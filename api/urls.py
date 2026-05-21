@@ -5,16 +5,19 @@ from .views import (
     InvestorViewSet,
     InvestmentViewSet,
     WithdrawalViewSet,
-    dashboard_stats
+    user_dashboard,
+    profile_view,
+    register,
 )
 
 router = DefaultRouter()
-
-router.register("investors", InvestorViewSet)
-router.register("investments", InvestmentViewSet)
-router.register("withdrawals", WithdrawalViewSet)
+router.register("investors",   InvestorViewSet,   basename="investor")
+router.register("investments", InvestmentViewSet, basename="investment")
+router.register("withdrawals", WithdrawalViewSet, basename="withdrawal")
 
 urlpatterns = [
     path("", include(router.urls)),
-    path("dashboard-stats/", dashboard_stats),
+    path("register/",       register),
+    path("user-dashboard/", user_dashboard),
+    path("profile/",        profile_view),
 ]
