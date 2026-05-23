@@ -1,3 +1,5 @@
+# api/urls.py
+
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
@@ -8,6 +10,9 @@ from .views import (
     user_dashboard,
     profile_view,
     register,
+    dashboard_stats,
+    all_users,
+    top_investors,       # ← NEW
 )
 
 router = DefaultRouter()
@@ -17,7 +22,10 @@ router.register("withdrawals", WithdrawalViewSet, basename="withdrawal")
 
 urlpatterns = [
     path("", include(router.urls)),
-    path("register/",       register),
-    path("user-dashboard/", user_dashboard),
-    path("profile/",        profile_view),
+    path("register/",        register),
+    path("user-dashboard/",  user_dashboard),
+    path("profile/",         profile_view),
+    path("dashboard-stats/", dashboard_stats),
+    path("users/",           all_users),
+    path("top-investors/",   top_investors),   # ← NEW
 ]
