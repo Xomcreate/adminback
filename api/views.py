@@ -12,13 +12,20 @@ from rest_framework import serializers as drf_serializers
 from .models import Investor, Investment, Withdrawal
 from .serializers import InvestorSerializer, InvestmentSerializer, WithdrawalSerializer
 
-CATEGORY_ROI = {
-    "Forex Trading":    2.5,
-    "Bitcoin Mining":   3.0,
-    "Real Estate":      2.0,
-    "Crypto Arbitrage": 3.5,
-}
+STOCK_CATEGORIES = [
+    "Tesla (TSLA)",
+    "Apple (AAPL)",
+    "Amazon (AMZN)",
+    "McDonald's (MCD)",
+    "GameStop (GME)",
+    "Coca-Cola (KO)",
+    "Meta (META)",
+    "Alphabet (GOOG)",
+    "Netflix (NFLX)",
+    "Intel (INTC)",
+]
 
+DAILY_ROI   = 10.0   # flat 10% for all categories
 EXPIRY_DAYS = 14
 
 
@@ -304,14 +311,16 @@ class InvestmentViewSet(viewsets.ModelViewSet):
         else:
             investor = requester
 
-        category  = self.request.data.get("category", "General")
-        daily_roi = CATEGORY_ROI.get(category, 2.0)
+        category = self.request.data.get("category", "Tesla (TSLA)")
+        # Validate category
+        if category not in STOCK_CATEGORIES:
+            category = "Tesla (TSLA)"
 
         serializer.save(
             investor  = investor,
             active    = False,
             approved  = False,
-            daily_roi = daily_roi,
+            daily_roi = DAILY_ROI,   # always 10%
         )
 
 
@@ -362,6 +371,13 @@ class WithdrawalViewSet(viewsets.ModelViewSet):
                     )
                 investor.balance -= instance.amount
                 investor.save(update_fields=["balance"])
+
+                # Deactivate all active investments for this investor
+                # so ROI stops accumulating after withdrawal is approved
+                Investment.objects.filter(
+                    investor=investor, active=True
+                ).update(active=False)
+
         return None
 
     def partial_update(self, request, *args, **kwargs):

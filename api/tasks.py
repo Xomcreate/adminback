@@ -13,12 +13,11 @@ EXPIRY_DAYS = 14
 
 def apply_daily_roi():
     """
-    Called once per day by your scheduler (e.g. django-apscheduler or celery beat).
+    Called once per day by your scheduler (django-apscheduler or celery beat).
     - Expires investments older than 14 days
-    - Applies daily ROI to all still-active investments
+    - Applies flat 10% daily ROI to all still-active investments
     - Credits investor wallet balance
-    - Every 14 days the 10% dividend is effectively realised through
-      compounded daily ROI (daily_roi % * 14 days ≈ total period return)
+    - ROI stops when investment expires or is no longer active
     """
     now              = timezone.now()
     expiry_threshold = now - timedelta(days=EXPIRY_DAYS)
@@ -35,9 +34,11 @@ def apply_daily_roi():
             investment.active = False
             investment.save(update_fields=["active"])
             expired += 1
-            logger.info(f"Expired investment #{investment.id} for {investment.investor.name}")
+            logger.info(
+                f"Expired investment #{investment.id} for {investment.investor.name}"
+            )
 
-    # Step 2 — apply daily ROI to all still-active investments
+    # Step 2 — apply daily ROI only to still-active investments
     for investment in Investment.objects.filter(active=True).select_related("investor"):
         with transaction.atomic():
             daily_gain                 = investment.amount * (investment.daily_roi / 100)
@@ -51,6 +52,7 @@ def apply_daily_roi():
             roi_updated += 1
             logger.info(
                 f"ROI applied: {investor.name} | "
+                f"Category: {investment.category} | "
                 f"+${float(daily_gain):.2f} | "
                 f"wallet now ${float(investor.balance):.2f}"
             )

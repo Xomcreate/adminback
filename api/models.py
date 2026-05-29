@@ -35,9 +35,9 @@ class Investor(models.Model):
 
 class Investment(models.Model):
     investor       = models.ForeignKey(Investor, on_delete=models.CASCADE)
-    category       = models.CharField(max_length=100, default="General")
+    category       = models.CharField(max_length=100, default="Tesla (TSLA)")
     amount         = models.DecimalField(max_digits=12, decimal_places=2)
-    daily_roi      = models.DecimalField(max_digits=5, decimal_places=2, default=2.0)
+    daily_roi      = models.DecimalField(max_digits=5, decimal_places=2, default=10.0)
     current_profit = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     payment_method = models.CharField(max_length=50, default="BTC")
     payment_proof  = models.ImageField(upload_to="proofs/", blank=True, null=True)

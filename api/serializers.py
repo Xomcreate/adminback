@@ -17,7 +17,7 @@ class InvestmentSerializer(serializers.ModelSerializer):
     class Meta:
         model            = Investment
         fields           = "__all__"
-        read_only_fields = ["investor", "active", "approved", "current_profit"]
+        read_only_fields = ["investor", "active", "approved", "current_profit", "daily_roi"]
 
     def validate_amount(self, value):
         if value < MIN_AMOUNT:
