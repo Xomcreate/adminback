@@ -8,19 +8,28 @@ from .models import Investment, Investor
 
 logger = logging.getLogger(__name__)
 
+EXPIRY_DAYS = 14
+
 
 def apply_daily_roi():
+    """
+    Called once per day by your scheduler (e.g. django-apscheduler or celery beat).
+    - Expires investments older than 14 days
+    - Applies daily ROI to all still-active investments
+    - Credits investor wallet balance
+    - Every 14 days the 10% dividend is effectively realised through
+      compounded daily ROI (daily_roi % * 14 days ≈ total period return)
+    """
     now              = timezone.now()
-    expiry_threshold = now - timedelta(days=30)
+    expiry_threshold = now - timedelta(days=EXPIRY_DAYS)
     roi_updated      = 0
     expired          = 0
 
-    # Step 1 — expire investments older than 30 days
+    # Step 1 — expire investments older than 14 days
     expiring = Investment.objects.filter(
         active=True,
         created_at__lte=expiry_threshold
     )
-
     for investment in expiring:
         with transaction.atomic():
             investment.active = False
@@ -28,10 +37,10 @@ def apply_daily_roi():
             expired += 1
             logger.info(f"Expired investment #{investment.id} for {investment.investor.name}")
 
-    # Step 2 — apply daily ROI to all still-active investments and credit wallet
+    # Step 2 — apply daily ROI to all still-active investments
     for investment in Investment.objects.filter(active=True).select_related("investor"):
         with transaction.atomic():
-            daily_gain                = investment.amount * (investment.daily_roi / 100)
+            daily_gain                 = investment.amount * (investment.daily_roi / 100)
             investment.current_profit += daily_gain
             investment.save(update_fields=["current_profit"])
 

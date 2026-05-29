@@ -12,9 +12,18 @@ from rest_framework import serializers as drf_serializers
 from .models import Investor, Investment, Withdrawal
 from .serializers import InvestorSerializer, InvestmentSerializer, WithdrawalSerializer
 
+CATEGORY_ROI = {
+    "Forex Trading":    2.5,
+    "Bitcoin Mining":   3.0,
+    "Real Estate":      2.0,
+    "Crypto Arbitrage": 3.5,
+}
+
+EXPIRY_DAYS = 14
+
 
 # ─────────────────────────────────────────────
-# AUTH / REGISTRATION
+# AUTH
 # ─────────────────────────────────────────────
 
 @api_view(["POST"])
@@ -26,38 +35,54 @@ def register(request):
 
     if not username or not email or not password:
         return Response({"error": "All fields are required"}, status=400)
-
     if User.objects.filter(username=username).exists():
         return Response({"error": "Username already taken"}, status=400)
-
     if User.objects.filter(email=email).exists():
         return Response({"error": "Email already registered"}, status=400)
 
     user = User.objects.create_user(username=username, email=email, password=password)
-
     Investor.objects.create(
-        user=user,
-        name=username,
-        email=email,
-        phone="",
-        role="user",
+        user=user, name=username, email=email, phone="", role="user",
     )
-
     return Response({"message": "Account created successfully"}, status=201)
 
 
 # ─────────────────────────────────────────────
-# DASHBOARD STATS  (admin-facing)
+# APPROVE INVESTMENT
+# ─────────────────────────────────────────────
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def approve_investment(request, pk):
+    try:
+        requester = Investor.objects.get(user=request.user)
+    except Investor.DoesNotExist:
+        return Response({"error": "Not found"}, status=404)
+
+    if requester.role != "admin":
+        return Response({"error": "Forbidden"}, status=403)
+
+    try:
+        investment = Investment.objects.get(pk=pk)
+    except Investment.DoesNotExist:
+        return Response({"error": "Investment not found"}, status=404)
+
+    investment.approved = True
+    investment.active   = True
+    investment.save(update_fields=["approved", "active"])
+    return Response({"message": "Investment approved and activated."})
+
+
+# ─────────────────────────────────────────────
+# DASHBOARD STATS
 # ─────────────────────────────────────────────
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def dashboard_stats(request):
-    expiry_threshold = timezone.now() - timedelta(days=30)
-
+    expiry_threshold = timezone.now() - timedelta(days=EXPIRY_DAYS)
     Investment.objects.filter(
-        active=True,
-        created_at__lte=expiry_threshold
+        active=True, created_at__lte=expiry_threshold
     ).update(active=False)
 
     total_users       = User.objects.count()
@@ -82,8 +107,8 @@ def dashboard_stats(request):
         .values("month", "total")
     )
     monthly_data = [
-        {"month": entry["month"].strftime("%b %Y"), "total": float(entry["total"])}
-        for entry in monthly_investments
+        {"month": e["month"].strftime("%b %Y"), "total": float(e["total"])}
+        for e in monthly_investments
     ]
 
     return Response({
@@ -100,7 +125,7 @@ def dashboard_stats(request):
 
 
 # ─────────────────────────────────────────────
-# TOP INVESTORS  (admin-facing)
+# TOP INVESTORS
 # ─────────────────────────────────────────────
 
 @api_view(["GET"])
@@ -110,34 +135,43 @@ def top_investors(request):
         Investor.objects
         .filter(role="user", blocked=False)
         .annotate(
-            total_invested = models.Sum("investment__amount"),
-            total_profit   = models.Sum("investment__current_profit"),
-            active_plans   = models.Count(
-                "investment",
-                filter=models.Q(investment__active=True)
+            total_invested   = models.Sum("investment__amount"),
+            total_profit     = models.Sum("investment__current_profit"),
+            active_plans     = models.Count(
+                "investment", filter=models.Q(investment__active=True)
             ),
+            investment_count = models.Count("investment"),
         )
         .filter(total_invested__isnull=False)
         .order_by("-total_invested")[:10]
     )
 
+    def get_tier(count):
+        if count >= 6:   return "bronze"
+        elif count >= 3: return "gold"
+        elif count >= 1: return "silver"
+        return "none"
+
     data = []
     for rank, inv in enumerate(investors, start=1):
+        count = inv.investment_count or 0
         data.append({
-            "rank":           rank,
-            "name":           inv.name,
-            "email":          inv.email,
-            "total_invested": float(inv.total_invested or 0),
-            "total_profit":   float(inv.total_profit   or 0),
-            "balance":        float(inv.balance),
-            "active_plans":   inv.active_plans,
+            "rank":             rank,
+            "name":             inv.name,
+            "email":            inv.email,
+            "total_invested":   float(inv.total_invested or 0),
+            "total_profit":     float(inv.total_profit   or 0),
+            "balance":          float(inv.balance),
+            "active_plans":     inv.active_plans,
+            "tier":             get_tier(count),
+            "investment_count": count,
         })
 
     return Response(data)
 
 
 # ─────────────────────────────────────────────
-# ALL REGISTERED USERS  (admin-facing)
+# ALL USERS
 # ─────────────────────────────────────────────
 
 @api_view(["GET"])
@@ -150,7 +184,7 @@ def all_users(request):
 
 
 # ─────────────────────────────────────────────
-# USER DASHBOARD  (investor-facing)
+# USER DASHBOARD
 # ─────────────────────────────────────────────
 
 @api_view(["GET"])
@@ -174,10 +208,8 @@ def user_dashboard(request):
         except Investor.DoesNotExist:
             return Response({"error": "Investor profile not found"}, status=404)
 
-    investments = Investment.objects.filter(investor=investor)
-    withdrawals = Withdrawal.objects.filter(investor=investor)
-
-    # active_profits is the running total of current_profit on active investments
+    investments    = Investment.objects.filter(investor=investor)
+    withdrawals    = Withdrawal.objects.filter(investor=investor)
     active_profits = sum(inv.current_profit for inv in investments if inv.active)
 
     profile_data = InvestorSerializer(investor).data
@@ -213,7 +245,6 @@ def profile_view(request):
     data["active_profits"] = float(active_profits)
     data["live_balance"]   = float(investor.balance) + float(active_profits)
     data["bonus"]          = float(investor.bonus)
-
     return Response(data)
 
 
@@ -247,26 +278,23 @@ class InvestmentViewSet(viewsets.ModelViewSet):
             return Investment.objects.none()
 
         if investor.role == "admin":
-            expiry_threshold = timezone.now() - timedelta(days=30)
+            expiry_threshold = timezone.now() - timedelta(days=EXPIRY_DAYS)
             Investment.objects.filter(
-                active=True,
-                created_at__lte=expiry_threshold
+                active=True, created_at__lte=expiry_threshold
             ).update(active=False)
-            return Investment.objects.all()
+            return Investment.objects.all().order_by("-created_at")
 
-        qs           = Investment.objects.filter(investor=investor)
+        qs           = Investment.objects.filter(investor=investor).order_by("-created_at")
         active_param = self.request.query_params.get("active")
         if active_param == "true":
             qs = qs.filter(active=True)
         elif active_param == "false":
             qs = qs.filter(active=False)
-
         return qs
 
     def perform_create(self, serializer):
         requester = Investor.objects.get(user=self.request.user)
 
-        # If admin is creating, allow them to assign to any investor
         investor_id = self.request.data.get("investor")
         if investor_id and requester.role == "admin":
             try:
@@ -276,7 +304,15 @@ class InvestmentViewSet(viewsets.ModelViewSet):
         else:
             investor = requester
 
-        serializer.save(investor=investor, active=True)
+        category  = self.request.data.get("category", "General")
+        daily_roi = CATEGORY_ROI.get(category, 2.0)
+
+        serializer.save(
+            investor  = investor,
+            active    = False,
+            approved  = False,
+            daily_roi = daily_roi,
+        )
 
 
 class WithdrawalViewSet(viewsets.ModelViewSet):
@@ -292,7 +328,6 @@ class WithdrawalViewSet(viewsets.ModelViewSet):
 
         if investor.role == "admin":
             return Withdrawal.objects.all()
-
         return Withdrawal.objects.filter(investor=investor)
 
     def perform_create(self, serializer):
@@ -301,7 +336,6 @@ class WithdrawalViewSet(viewsets.ModelViewSet):
         except Investor.DoesNotExist:
             raise drf_serializers.ValidationError("Investor profile not found")
 
-        # If admin is creating, allow them to assign to any investor
         investor_id = self.request.data.get("investor")
         if investor_id and requester.role == "admin":
             try:
@@ -319,13 +353,11 @@ class WithdrawalViewSet(viewsets.ModelViewSet):
                 investor = Investor.objects.select_for_update().get(pk=instance.investor.pk)
                 if investor.balance < instance.amount:
                     return Response(
-                        {
-                            "error": (
-                                f"Insufficient balance. "
-                                f"Investor has ${float(investor.balance):.2f} but "
-                                f"withdrawal is ${float(instance.amount):.2f}."
-                            )
-                        },
+                        {"error": (
+                            f"Insufficient balance. "
+                            f"Investor has ${float(investor.balance):.2f} but "
+                            f"withdrawal is ${float(instance.amount):.2f}."
+                        )},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
                 investor.balance -= instance.amount
