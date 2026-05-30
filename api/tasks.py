@@ -13,49 +13,55 @@ EXPIRY_DAYS = 14
 
 def apply_daily_roi():
     """
-    Called once per day by your scheduler (django-apscheduler or celery beat).
-    - Expires investments older than 14 days
-    - Applies flat 10% daily ROI to all still-active investments
-    - Credits investor wallet balance
-    - ROI stops when investment expires or is no longer active
+    Runs once per day via APScheduler (midnight UTC).
+
+    ROI Policy:
+      - Flat 10% ROI calculated ONCE after 14 days (not daily).
+      - At maturity: principal + 10% profit credited to investor wallet.
+      - Investment is then deactivated automatically.
+      - No balance change happens before the 14-day mark.
+      - If investor withdraws, all active investments are deactivated
+        immediately (handled in WithdrawalViewSet) — no further ROI earned.
     """
     now              = timezone.now()
     expiry_threshold = now - timedelta(days=EXPIRY_DAYS)
-    roi_updated      = 0
-    expired          = 0
+    matured          = 0
 
-    # Step 1 — expire investments older than 14 days
     expiring = Investment.objects.filter(
         active=True,
-        created_at__lte=expiry_threshold
-    )
+        approved=True,
+        created_at__lte=expiry_threshold,
+    ).select_related("investor")
+
     for investment in expiring:
         with transaction.atomic():
-            investment.active = False
-            investment.save(update_fields=["active"])
-            expired += 1
-            logger.info(
-                f"Expired investment #{investment.id} for {investment.investor.name}"
+            investor = Investor.objects.select_for_update().get(
+                pk=investment.investor.pk
             )
 
-    # Step 2 — apply daily ROI only to still-active investments
-    for investment in Investment.objects.filter(active=True).select_related("investor"):
-        with transaction.atomic():
-            daily_gain                 = investment.amount * (investment.daily_roi / 100)
-            investment.current_profit += daily_gain
-            investment.save(update_fields=["current_profit"])
+            # 10% flat profit on original principal
+            profit = investment.amount * (investment.daily_roi / 100)
+            payout = investment.amount + profit  # principal + profit
 
-            investor          = Investor.objects.select_for_update().get(pk=investment.investor.pk)
-            investor.balance += daily_gain
+            investment.current_profit = profit
+            investment.active         = False
+            investment.save(update_fields=["current_profit", "active"])
+
+            investor.balance += payout
             investor.save(update_fields=["balance"])
 
-            roi_updated += 1
+            matured += 1
             logger.info(
-                f"ROI applied: {investor.name} | "
+                f"[MATURED] {investor.name} | "
                 f"Category: {investment.category} | "
-                f"+${float(daily_gain):.2f} | "
-                f"wallet now ${float(investor.balance):.2f}"
+                f"Principal: ${float(investment.amount):.2f} | "
+                f"Profit: ${float(profit):.2f} | "
+                f"Payout: ${float(payout):.2f} | "
+                f"New Balance: ${float(investor.balance):.2f}"
             )
 
-    logger.info(f"[{now.date()}] {roi_updated} updated, {expired} expired")
-    return f"Done: {roi_updated} updated, {expired} expired"
+    logger.info(
+        f"[{now.date()}] ROI job complete — "
+        f"{matured} investment(s) matured and credited."
+    )
+    return f"Done: {matured} matured"

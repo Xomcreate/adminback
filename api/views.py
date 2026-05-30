@@ -1,5 +1,6 @@
 from datetime import timedelta
 
+from django.conf import settings
 from django.contrib.auth.models import User
 from django.db import models, transaction
 from django.utils import timezone
@@ -25,7 +26,7 @@ STOCK_CATEGORIES = [
     "Intel (INTC)",
 ]
 
-DAILY_ROI   = 10.0   # flat 10% for all categories
+DAILY_ROI   = 10.0
 EXPIRY_DAYS = 14
 
 
@@ -52,6 +53,28 @@ def register(request):
         user=user, name=username, email=email, phone="", role="user",
     )
     return Response({"message": "Account created successfully"}, status=201)
+
+
+# ─────────────────────────────────────────────
+# FALLBACK WEBHOOK (for cron-job.org on free tier)
+# ─────────────────────────────────────────────
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def trigger_roi(request):
+    """
+    Protected webhook fallback.
+    Use cron-job.org to POST to /api/trigger-roi/ daily with:
+      { "token": "<ROI_SECRET_TOKEN from Render env vars>" }
+    This ensures ROI runs even if APScheduler misfires on free-tier dynos.
+    """
+    token = request.data.get("token")
+    if not token or token != settings.ROI_SECRET_TOKEN:
+        return Response({"error": "Forbidden"}, status=403)
+
+    from .tasks import apply_daily_roi
+    result = apply_daily_roi()
+    return Response({"result": result})
 
 
 # ─────────────────────────────────────────────
@@ -87,11 +110,7 @@ def approve_investment(request, pk):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def dashboard_stats(request):
-    expiry_threshold = timezone.now() - timedelta(days=EXPIRY_DAYS)
-    Investment.objects.filter(
-        active=True, created_at__lte=expiry_threshold
-    ).update(active=False)
-
+    # Expiry is now owned entirely by APScheduler — no manual expiry here
     total_users       = User.objects.count()
     total_investments = Investment.objects.aggregate(total=models.Sum("amount"))["total"] or 0
     total_withdrawals = Withdrawal.objects.aggregate(total=models.Sum("amount"))["total"] or 0
@@ -215,8 +234,11 @@ def user_dashboard(request):
         except Investor.DoesNotExist:
             return Response({"error": "Investor profile not found"}, status=404)
 
-    investments    = Investment.objects.filter(investor=investor)
-    withdrawals    = Withdrawal.objects.filter(investor=investor)
+    investments = Investment.objects.filter(investor=investor)
+    withdrawals = Withdrawal.objects.filter(investor=investor)
+
+    # active_profits: only show pending profit for active investments
+    # (will be 0 until maturity since we don't accumulate daily)
     active_profits = sum(inv.current_profit for inv in investments if inv.active)
 
     profile_data = InvestorSerializer(investor).data
@@ -285,10 +307,7 @@ class InvestmentViewSet(viewsets.ModelViewSet):
             return Investment.objects.none()
 
         if investor.role == "admin":
-            expiry_threshold = timezone.now() - timedelta(days=EXPIRY_DAYS)
-            Investment.objects.filter(
-                active=True, created_at__lte=expiry_threshold
-            ).update(active=False)
+            # No manual expiry here — scheduler owns it
             return Investment.objects.all().order_by("-created_at")
 
         qs           = Investment.objects.filter(investor=investor).order_by("-created_at")
@@ -312,7 +331,6 @@ class InvestmentViewSet(viewsets.ModelViewSet):
             investor = requester
 
         category = self.request.data.get("category", "Tesla (TSLA)")
-        # Validate category
         if category not in STOCK_CATEGORIES:
             category = "Tesla (TSLA)"
 
@@ -320,7 +338,7 @@ class InvestmentViewSet(viewsets.ModelViewSet):
             investor  = investor,
             active    = False,
             approved  = False,
-            daily_roi = DAILY_ROI,   # always 10%
+            daily_roi = DAILY_ROI,
         )
 
 
@@ -359,7 +377,9 @@ class WithdrawalViewSet(viewsets.ModelViewSet):
     def _maybe_deduct_balance(self, instance, new_status):
         if new_status == "Approved" and instance.status == "Pending":
             with transaction.atomic():
-                investor = Investor.objects.select_for_update().get(pk=instance.investor.pk)
+                investor = Investor.objects.select_for_update().get(
+                    pk=instance.investor.pk
+                )
                 if investor.balance < instance.amount:
                     return Response(
                         {"error": (
@@ -372,8 +392,8 @@ class WithdrawalViewSet(viewsets.ModelViewSet):
                 investor.balance -= instance.amount
                 investor.save(update_fields=["balance"])
 
-                # Deactivate all active investments for this investor
-                # so ROI stops accumulating after withdrawal is approved
+                # Policy: deactivate all active investments on withdrawal approval
+                # so no further ROI is earned
                 Investment.objects.filter(
                     investor=investor, active=True
                 ).update(active=False)

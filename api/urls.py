@@ -12,6 +12,7 @@ from .views import (
     all_users,
     top_investors,
     approve_investment,
+    trigger_roi,          # ← ADD
 )
 
 router = DefaultRouter()
@@ -28,4 +29,5 @@ urlpatterns = [
     path("users/",                         all_users),
     path("top-investors/",                 top_investors),
     path("investments/<int:pk>/approve/",  approve_investment),
+    path("trigger-roi/",                   trigger_roi),   # ← ADD
 ]

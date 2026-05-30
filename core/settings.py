@@ -41,6 +41,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'rest_framework_simplejwt',
     'corsheaders',
+    'django_apscheduler', 
     'api',
     'django.contrib.admin',
     'django.contrib.auth',
@@ -153,3 +154,8 @@ REST_FRAMEWORK = {
 
 # Whitenoise static files compression
 STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+
+ROI_SECRET_TOKEN = os.environ.get("ROI_SECRET_TOKEN", "change-me-in-production")
+
+APSCHEDULER_DATETIME_FORMAT = "N j, Y, f:s a"
+APSCHEDULER_RUN_NOW_TIMEOUT = 25  # seconds
