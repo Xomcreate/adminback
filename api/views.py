@@ -104,13 +104,55 @@ def approve_investment(request, pk):
 
 
 # ─────────────────────────────────────────────
+# ADD MANUAL PROFIT
+# ─────────────────────────────────────────────
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def add_profit(request, pk):
+    """
+    Admin-only endpoint to manually add profit to an investment.
+    POST { "amount": 50.00 }
+    Adds the amount to investment.current_profit only (does NOT touch balance).
+    Balance is only credited when the investment matures via the scheduler.
+    """
+    try:
+        requester = Investor.objects.get(user=request.user)
+    except Investor.DoesNotExist:
+        return Response({"error": "Not found"}, status=404)
+
+    if requester.role != "admin":
+        return Response({"error": "Forbidden"}, status=403)
+
+    try:
+        investment = Investment.objects.get(pk=pk)
+    except Investment.DoesNotExist:
+        return Response({"error": "Investment not found"}, status=404)
+
+    try:
+        amount = float(request.data.get("amount", 0))
+        if amount <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return Response({"error": "Invalid amount. Must be a positive number."}, status=400)
+
+    from decimal import Decimal
+    investment.current_profit += Decimal(str(amount))
+    investment.save(update_fields=["current_profit"])
+
+    return Response({
+        "message": f"Profit of ${amount:.2f} added successfully.",
+        "current_profit": float(investment.current_profit),
+    })
+
+
+# ─────────────────────────────────────────────
 # DASHBOARD STATS
 # ─────────────────────────────────────────────
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def dashboard_stats(request):
-    # Expiry is now owned entirely by APScheduler — no manual expiry here
     total_users       = User.objects.count()
     total_investments = Investment.objects.aggregate(total=models.Sum("amount"))["total"] or 0
     total_withdrawals = Withdrawal.objects.aggregate(total=models.Sum("amount"))["total"] or 0
@@ -237,8 +279,6 @@ def user_dashboard(request):
     investments = Investment.objects.filter(investor=investor)
     withdrawals = Withdrawal.objects.filter(investor=investor)
 
-    # active_profits: only show pending profit for active investments
-    # (will be 0 until maturity since we don't accumulate daily)
     active_profits = sum(inv.current_profit for inv in investments if inv.active)
 
     profile_data = InvestorSerializer(investor).data
@@ -307,7 +347,6 @@ class InvestmentViewSet(viewsets.ModelViewSet):
             return Investment.objects.none()
 
         if investor.role == "admin":
-            # No manual expiry here — scheduler owns it
             return Investment.objects.all().order_by("-created_at")
 
         qs           = Investment.objects.filter(investor=investor).order_by("-created_at")
@@ -392,8 +431,6 @@ class WithdrawalViewSet(viewsets.ModelViewSet):
                 investor.balance -= instance.amount
                 investor.save(update_fields=["balance"])
 
-                # Policy: deactivate all active investments on withdrawal approval
-                # so no further ROI is earned
                 Investment.objects.filter(
                     investor=investor, active=True
                 ).update(active=False)
