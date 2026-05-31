@@ -98,7 +98,7 @@ def approve_investment(request, pk):
 
 
 # ─────────────────────────────────────────────
-# ADD MANUAL PROFIT — FIXED
+# ADD MANUAL PROFIT
 # ─────────────────────────────────────────────
 
 @api_view(["POST"])
@@ -133,19 +133,19 @@ def add_profit(request, pk):
 
     from decimal import Decimal
     amount_decimal = Decimal(str(amount))
-    payout = investment.amount + amount_decimal  # principal + profit
+    payout = investment.amount + amount_decimal
 
     with transaction.atomic():
         investment.current_profit += amount_decimal
-        investment.active = False  # close investment, same as auto ROI
+        investment.active = False
         investment.save(update_fields=["current_profit", "active"])
 
         investor = Investor.objects.select_for_update().get(pk=investment.investor.pk)
-        investor.balance += payout  # principal + profit credited to wallet
+        investor.balance += payout
         investor.save(update_fields=["balance"])
 
     return Response({
-        "message": f"Profit of ${amount:.2f} added. Investment closed. ${float(payout):.2f} credited to wallet.",
+        "message":        f"Profit of ${amount:.2f} added. Investment closed. ${float(payout):.2f} credited to wallet.",
         "current_profit": float(investment.current_profit),
         "payout":         float(payout),
         "new_balance":    float(investor.balance),
@@ -312,12 +312,13 @@ def user_dashboard(request):
     investments = Investment.objects.filter(investor=investor)
     withdrawals = Withdrawal.objects.filter(investor=investor)
 
-    active_profits = sum(inv.current_profit for inv in investments if inv.active)
+    # CHANGED: sum current_profit from ALL investments, not just active
+    total_profits = sum(inv.current_profit for inv in investments)
 
     profile_data = InvestorSerializer(investor).data
     profile_data["wallet_balance"] = float(investor.balance)
-    profile_data["active_profits"] = float(active_profits)
-    profile_data["live_balance"]   = float(investor.balance) + float(active_profits)
+    profile_data["active_profits"] = float(total_profits)
+    profile_data["live_balance"]   = float(investor.balance) + float(total_profits)
     profile_data["bonus"]          = float(investor.bonus)
 
     return Response({
@@ -339,13 +340,14 @@ def profile_view(request):
     except Investor.DoesNotExist:
         return Response({"error": "Profile not found"}, status=404)
 
-    active_investments = Investment.objects.filter(investor=investor, active=True)
-    active_profits     = sum(inv.current_profit for inv in active_investments)
+    # CHANGED: sum current_profit from ALL investments, not just active
+    all_investments = Investment.objects.filter(investor=investor)
+    total_profits   = sum(inv.current_profit for inv in all_investments)
 
     data = InvestorSerializer(investor).data
     data["wallet_balance"] = float(investor.balance)
-    data["active_profits"] = float(active_profits)
-    data["live_balance"]   = float(investor.balance) + float(active_profits)
+    data["active_profits"] = float(total_profits)
+    data["live_balance"]   = float(investor.balance) + float(total_profits)
     data["bonus"]          = float(investor.bonus)
     return Response(data)
 
