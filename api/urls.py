@@ -13,6 +13,7 @@ from .views import (
     top_investors,
     approve_investment,
     add_profit,
+    delete_user,
     trigger_roi,
 )
 
@@ -28,6 +29,7 @@ urlpatterns = [
     path("profile/",                           profile_view),
     path("dashboard-stats/",                   dashboard_stats),
     path("users/",                             all_users),
+    path("users/<int:pk>/delete/",             delete_user),
     path("top-investors/",                     top_investors),
     path("investments/<int:pk>/approve/",      approve_investment),
     path("investments/<int:pk>/add_profit/",   add_profit),

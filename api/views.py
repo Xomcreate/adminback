@@ -62,12 +62,6 @@ def register(request):
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def trigger_roi(request):
-    """
-    Protected webhook fallback.
-    Use cron-job.org to POST to /api/trigger-roi/ daily with:
-      { "token": "<ROI_SECRET_TOKEN from Render env vars>" }
-    This ensures ROI runs even if APScheduler misfires on free-tier dynos.
-    """
     token = request.data.get("token")
     if not token or token != settings.ROI_SECRET_TOKEN:
         return Response({"error": "Forbidden"}, status=403)
@@ -113,8 +107,8 @@ def add_profit(request, pk):
     """
     Admin-only endpoint to manually add profit to an investment.
     POST { "amount": 50.00 }
-    Adds the amount to investment.current_profit only (does NOT touch balance).
-    Balance is only credited when the investment matures via the scheduler.
+    - Adds to investment.current_profit
+    - Also credits the investor's wallet balance immediately
     """
     try:
         requester = Investor.objects.get(user=request.user)
@@ -137,13 +131,51 @@ def add_profit(request, pk):
         return Response({"error": "Invalid amount. Must be a positive number."}, status=400)
 
     from decimal import Decimal
-    investment.current_profit += Decimal(str(amount))
-    investment.save(update_fields=["current_profit"])
+    amount_decimal = Decimal(str(amount))
+
+    with transaction.atomic():
+        investment.current_profit += amount_decimal
+        investment.save(update_fields=["current_profit"])
+
+        investor = Investor.objects.select_for_update().get(pk=investment.investor.pk)
+        investor.balance += amount_decimal
+        investor.save(update_fields=["balance"])
 
     return Response({
         "message": f"Profit of ${amount:.2f} added successfully.",
         "current_profit": float(investment.current_profit),
+        "new_balance": float(investor.balance),
     })
+
+
+# ─────────────────────────────────────────────
+# DELETE REGISTERED USER
+# ─────────────────────────────────────────────
+
+@api_view(["DELETE"])
+@permission_classes([IsAuthenticated])
+def delete_user(request, pk):
+    """
+    Admin-only. Deletes a Django auth User and their linked Investor profile.
+    """
+    try:
+        requester = Investor.objects.get(user=request.user)
+    except Investor.DoesNotExist:
+        return Response({"error": "Not found"}, status=404)
+
+    if requester.role != "admin":
+        return Response({"error": "Forbidden"}, status=403)
+
+    try:
+        user = User.objects.get(pk=pk)
+    except User.DoesNotExist:
+        return Response({"error": "User not found"}, status=404)
+
+    if user == request.user:
+        return Response({"error": "You cannot delete your own account."}, status=400)
+
+    user.delete()  # CASCADE deletes linked Investor too (OneToOneField)
+    return Response({"message": "User deleted successfully."})
 
 
 # ─────────────────────────────────────────────
