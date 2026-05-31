@@ -98,7 +98,7 @@ def approve_investment(request, pk):
 
 
 # ─────────────────────────────────────────────
-# ADD MANUAL PROFIT
+# ADD MANUAL PROFIT — FIXED
 # ─────────────────────────────────────────────
 
 @api_view(["POST"])
@@ -108,7 +108,8 @@ def add_profit(request, pk):
     Admin-only endpoint to manually add profit to an investment.
     POST { "amount": 50.00 }
     - Adds to investment.current_profit
-    - Also credits the investor's wallet balance immediately
+    - Credits principal + profit to investor wallet (mirrors auto ROI)
+    - Deactivates the investment (mirrors auto ROI)
     """
     try:
         requester = Investor.objects.get(user=request.user)
@@ -132,19 +133,22 @@ def add_profit(request, pk):
 
     from decimal import Decimal
     amount_decimal = Decimal(str(amount))
+    payout = investment.amount + amount_decimal  # principal + profit
 
     with transaction.atomic():
         investment.current_profit += amount_decimal
-        investment.save(update_fields=["current_profit"])
+        investment.active = False  # close investment, same as auto ROI
+        investment.save(update_fields=["current_profit", "active"])
 
         investor = Investor.objects.select_for_update().get(pk=investment.investor.pk)
-        investor.balance += amount_decimal
+        investor.balance += payout  # principal + profit credited to wallet
         investor.save(update_fields=["balance"])
 
     return Response({
-        "message": f"Profit of ${amount:.2f} added successfully.",
+        "message": f"Profit of ${amount:.2f} added. Investment closed. ${float(payout):.2f} credited to wallet.",
         "current_profit": float(investment.current_profit),
-        "new_balance": float(investor.balance),
+        "payout":         float(payout),
+        "new_balance":    float(investor.balance),
     })
 
 
@@ -155,9 +159,6 @@ def add_profit(request, pk):
 @api_view(["DELETE"])
 @permission_classes([IsAuthenticated])
 def delete_user(request, pk):
-    """
-    Admin-only. Deletes a Django auth User and their linked Investor profile.
-    """
     try:
         requester = Investor.objects.get(user=request.user)
     except Investor.DoesNotExist:
@@ -174,7 +175,7 @@ def delete_user(request, pk):
     if user == request.user:
         return Response({"error": "You cannot delete your own account."}, status=400)
 
-    user.delete()  # CASCADE deletes linked Investor too (OneToOneField)
+    user.delete()
     return Response({"message": "User deleted successfully."})
 
 
