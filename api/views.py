@@ -13,14 +13,46 @@ from rest_framework import serializers as drf_serializers
 from .models import Investor, Investment, Withdrawal
 from .serializers import InvestorSerializer, InvestmentSerializer, WithdrawalSerializer
 
+# ── All valid investment categories ──────────────────────────────────────────
+# These are the categories a user can invest IN.
+# Tier (Silver/Gold/Diamond) is assigned automatically based on investment count.
 STOCK_CATEGORIES = [
+    # Named investment plans
     "Silver Plan",
     "Gold Plan",
     "Diamond Plan",
+    # Stock companies
+    "Tesla (TSLA)",
+    "Apple (AAPL)",
+    "Amazon (AMZN)",
+    "McDonald's (MCD)",
+    "GameStop (GME)",
+    "Coca-Cola (KO)",
+    "Meta (META)",
+    "Alphabet (GOOG)",
+    "Netflix (NFLX)",
+    "Intel (INTC)",
 ]
 
 DAILY_ROI   = 25.0   # 25% per day
 EXPIRY_DAYS = 120    # 120-day lock period
+
+
+# ─────────────────────────────────────────────
+# TIER HELPER
+# Silver  = 1–2 total investments
+# Gold    = 3–5 total investments
+# Diamond = 6+  total investments
+# ─────────────────────────────────────────────
+
+def get_tier(investment_count):
+    if investment_count >= 6:
+        return "diamond"
+    elif investment_count >= 3:
+        return "gold"
+    elif investment_count >= 1:
+        return "silver"
+    return "none"
 
 
 # ─────────────────────────────────────────────
@@ -240,12 +272,6 @@ def top_investors(request):
         .order_by("-total_invested")[:10]
     )
 
-    def get_tier(count):
-        if count >= 6:   return "diamond"
-        elif count >= 3: return "gold"
-        elif count >= 1: return "silver"
-        return "none"
-
     data = []
     for rank, inv in enumerate(investors, start=1):
         count = inv.investment_count or 0
@@ -257,7 +283,7 @@ def top_investors(request):
             "total_profit":     float(inv.total_profit   or 0),
             "balance":          float(inv.balance),
             "active_plans":     inv.active_plans,
-            "tier":             get_tier(count),
+            "tier":             get_tier(count),   # Silver 1-2 | Gold 3-5 | Diamond 6+
             "investment_count": count,
         })
 
@@ -335,11 +361,16 @@ def profile_view(request):
     all_investments = Investment.objects.filter(investor=investor)
     total_profits   = sum(inv.current_profit for inv in all_investments)
 
+    # Include current tier in profile
+    investment_count = all_investments.count()
+
     data = InvestorSerializer(investor).data
-    data["wallet_balance"] = float(investor.balance)
-    data["active_profits"] = float(total_profits)
-    data["live_balance"]   = float(investor.balance) + float(total_profits)
-    data["bonus"]          = float(investor.bonus)
+    data["wallet_balance"]    = float(investor.balance)
+    data["active_profits"]    = float(total_profits)
+    data["live_balance"]      = float(investor.balance) + float(total_profits)
+    data["bonus"]             = float(investor.bonus)
+    data["tier"]              = get_tier(investment_count)
+    data["investment_count"]  = investment_count
     return Response(data)
 
 
@@ -395,9 +426,10 @@ class InvestmentViewSet(viewsets.ModelViewSet):
         else:
             investor = requester
 
-        category = self.request.data.get("category", "Silver Plan")
+        # Validate category — accept any from the full list, default to Tesla (TSLA)
+        category = self.request.data.get("category", "Tesla (TSLA)")
         if category not in STOCK_CATEGORIES:
-            category = "Silver Plan"
+            category = "Tesla (TSLA)"
 
         serializer.save(
             investor  = investor,

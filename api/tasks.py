@@ -21,6 +21,9 @@ def apply_daily_roi():
       - Investment is then deactivated automatically.
       - No withdrawals are permitted until the 120-day lock period has elapsed.
       - If investor withdraws after 120 days, balance is deducted in WithdrawalViewSet.
+
+    Categories are whatever the user invested in (Tesla, Apple, Silver Plan, etc.)
+    Tier (Silver/Gold/Diamond) is a separate concept assigned by investment count in views.py.
     """
     now              = timezone.now()
     expiry_threshold = now - timedelta(days=EXPIRY_DAYS)

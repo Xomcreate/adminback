@@ -22,8 +22,8 @@ class Command(BaseCommand):
         now              = timezone.now()
         expiry_threshold = now - timedelta(days=EXPIRY_DAYS)
 
-        roi_updated      = 0
-        matured          = 0
+        roi_updated = 0
+        matured     = 0
 
         # ── Step 1: Mature investments that have hit 120 days ─────────────────
         expiring_investments = Investment.objects.filter(
