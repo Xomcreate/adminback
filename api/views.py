@@ -14,20 +14,13 @@ from .models import Investor, Investment, Withdrawal
 from .serializers import InvestorSerializer, InvestmentSerializer, WithdrawalSerializer
 
 STOCK_CATEGORIES = [
-    "Tesla (TSLA)",
-    "Apple (AAPL)",
-    "Amazon (AMZN)",
-    "McDonald's (MCD)",
-    "GameStop (GME)",
-    "Coca-Cola (KO)",
-    "Meta (META)",
-    "Alphabet (GOOG)",
-    "Netflix (NFLX)",
-    "Intel (INTC)",
+    "Silver Plan",
+    "Gold Plan",
+    "Diamond Plan",
 ]
 
-DAILY_ROI   = 10.0
-EXPIRY_DAYS = 14
+DAILY_ROI   = 25.0   # 25% per day
+EXPIRY_DAYS = 120    # 120-day lock period
 
 
 # ─────────────────────────────────────────────
@@ -106,10 +99,10 @@ def approve_investment(request, pk):
 def add_profit(request, pk):
     """
     Admin-only endpoint to manually add profit to an investment.
-    POST { "amount": 50.00 }
+    POST { "amount": 50000.00 }
     - Adds to investment.current_profit
-    - Credits principal + profit to investor wallet (mirrors auto ROI)
-    - Deactivates the investment (mirrors auto ROI)
+    - Credits principal + profit to investor wallet
+    - Deactivates the investment
     """
     try:
         requester = Investor.objects.get(user=request.user)
@@ -133,7 +126,7 @@ def add_profit(request, pk):
 
     from decimal import Decimal
     amount_decimal = Decimal(str(amount))
-    payout = investment.amount + amount_decimal
+    payout = investment.amount + investment.current_profit + amount_decimal
 
     with transaction.atomic():
         investment.current_profit += amount_decimal
@@ -248,7 +241,7 @@ def top_investors(request):
     )
 
     def get_tier(count):
-        if count >= 6:   return "bronze"
+        if count >= 6:   return "diamond"
         elif count >= 3: return "gold"
         elif count >= 1: return "silver"
         return "none"
@@ -312,7 +305,6 @@ def user_dashboard(request):
     investments = Investment.objects.filter(investor=investor)
     withdrawals = Withdrawal.objects.filter(investor=investor)
 
-    # CHANGED: sum current_profit from ALL investments, not just active
     total_profits = sum(inv.current_profit for inv in investments)
 
     profile_data = InvestorSerializer(investor).data
@@ -340,7 +332,6 @@ def profile_view(request):
     except Investor.DoesNotExist:
         return Response({"error": "Profile not found"}, status=404)
 
-    # CHANGED: sum current_profit from ALL investments, not just active
     all_investments = Investment.objects.filter(investor=investor)
     total_profits   = sum(inv.current_profit for inv in all_investments)
 
@@ -404,9 +395,9 @@ class InvestmentViewSet(viewsets.ModelViewSet):
         else:
             investor = requester
 
-        category = self.request.data.get("category", "Tesla (TSLA)")
+        category = self.request.data.get("category", "Silver Plan")
         if category not in STOCK_CATEGORIES:
-            category = "Tesla (TSLA)"
+            category = "Silver Plan"
 
         serializer.save(
             investor  = investor,
@@ -445,6 +436,20 @@ class WithdrawalViewSet(viewsets.ModelViewSet):
                 investor = requester
         else:
             investor = requester
+
+        # ── 120-day lock: block withdrawals if any active investment is still running ──
+        if requester.role != "admin":
+            lock_threshold = timezone.now() - timedelta(days=EXPIRY_DAYS)
+            locked = Investment.objects.filter(
+                investor=investor,
+                active=True,
+                approved=True,
+                created_at__gt=lock_threshold,  # started less than 120 days ago
+            ).exists()
+            if locked:
+                raise drf_serializers.ValidationError(
+                    "Withdrawals are locked until your 120-day investment period is complete."
+                )
 
         serializer.save(investor=investor)
 

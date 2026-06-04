@@ -1,8 +1,8 @@
 from rest_framework import serializers
 from .models import Investor, Investment, Withdrawal
 
-MIN_AMOUNT = 100
-MAX_AMOUNT = 500
+MIN_AMOUNT = 500_000
+MAX_AMOUNT = 2_000_000
 
 
 class InvestorSerializer(serializers.ModelSerializer):
@@ -22,11 +22,11 @@ class InvestmentSerializer(serializers.ModelSerializer):
     def validate_amount(self, value):
         if value < MIN_AMOUNT:
             raise serializers.ValidationError(
-                f"Minimum investment amount is ${MIN_AMOUNT}."
+                f"Minimum investment amount is ${MIN_AMOUNT:,}."
             )
         if value > MAX_AMOUNT:
             raise serializers.ValidationError(
-                f"Maximum investment amount is ${MAX_AMOUNT}."
+                f"Maximum investment amount is ${MAX_AMOUNT:,}."
             )
         return value
 

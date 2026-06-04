@@ -23,4 +23,4 @@ urlpatterns = [
     path("api/token/",          TokenObtainPairView.as_view()),   # ← only here
     path("api/token/refresh/",  TokenRefreshView.as_view()),      # ← only here
     path("api/",                include("api.urls")),
-]
+]   
