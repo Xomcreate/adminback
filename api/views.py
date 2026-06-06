@@ -18,7 +18,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 
 from .models import Deposit, Investment, Investor, Referral, Withdrawal
-from .roi import apply_daily_roi          # roi.py holds the apply_daily_roi() function
+from api.management.commands.apply_daily_roi import apply_daily_roi   # ← changed
 from .serializers import (
     DepositSerializer,
     InvestmentSerializer,
@@ -30,7 +30,7 @@ from .serializers import (
 
 logger = logging.getLogger(__name__)
 
-REFERRAL_COMMISSION_RATE = 0.05   # 5% of referred user's first deposit
+REFERRAL_COMMISSION_RATE = 0.05
 ROI_TRIGGER_SECRET       = "roi-secret-key-change-in-prod"
 
 
@@ -39,7 +39,6 @@ ROI_TRIGGER_SECRET       = "roi-secret-key-change-in-prod"
 # ═════════════════════════════════════════════════════════════════════════════
 
 def get_investor_or_404(user):
-    """Return the Investor linked to a Django User, or raise a 404 Response."""
     try:
         return Investor.objects.get(user=user)
     except Investor.DoesNotExist:
@@ -59,14 +58,6 @@ def is_admin(user):
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def register(request):
-    """
-    POST /api/register/
-    Body: { username, email, password, referral_code? }
-
-    Creates a Django User + linked Investor profile.
-    If referral_code is a valid investor ID, links the referral.
-    Returns a token so the user is immediately logged in.
-    """
     username = request.data.get("username", "").strip()
     email    = request.data.get("email",    "").strip().lower()
     password = request.data.get("password", "")
@@ -88,13 +79,12 @@ def register(request):
         user = User.objects.create_user(username=username, email=email, password=password)
         token, _ = Token.objects.get_or_create(user=user)
 
-        # Resolve referrer
         referrer = None
         if ref_code:
             try:
                 referrer = Investor.objects.get(pk=int(ref_code))
             except (Investor.DoesNotExist, ValueError, TypeError):
-                pass   # Invalid ref code — silently ignore
+                pass
 
         investor = Investor.objects.create(
             user=user,
@@ -104,7 +94,6 @@ def register(request):
             referred_by=referrer,
         )
 
-        # Log the referral relationship
         if referrer:
             Referral.objects.get_or_create(referrer=referrer, referred=investor)
 
@@ -122,13 +111,6 @@ def register(request):
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def login_view(request):
-    """
-    POST /api/login/
-    Body: { username, password }
-
-    Returns token + role so the React app can route admin → /dashboard,
-    user → /user/dashboard.
-    """
     username = request.data.get("username", "").strip()
     password = request.data.get("password", "")
 
@@ -157,7 +139,7 @@ def login_view(request):
     return Response(
         {
             "token":   token.key,
-            "role":    investor.role,          # "admin" | "user"
+            "role":    investor.role,
             "user_id": investor.pk,
             "name":    investor.name,
         }
@@ -172,10 +154,6 @@ def login_view(request):
 @authentication_classes([TokenAuthentication])
 @permission_classes([IsAuthenticated])
 def user_dashboard(request):
-    """
-    GET /api/user-dashboard/
-    Returns everything the UserDashboard page needs in one call.
-    """
     investor = get_investor_or_404(request.user)
     if not investor:
         return Response({"error": "Investor not found."}, status=status.HTTP_404_NOT_FOUND)
@@ -209,10 +187,6 @@ def user_dashboard(request):
 @authentication_classes([TokenAuthentication])
 @permission_classes([IsAuthenticated])
 def dashboard_stats(request):
-    """
-    GET /api/dashboard-stats/
-    Admin-only summary for the admin Dashboard page.
-    """
     if not is_admin(request.user):
         return Response({"error": "Admin access required."}, status=status.HTTP_403_FORBIDDEN)
 
@@ -240,10 +214,6 @@ def dashboard_stats(request):
 @authentication_classes([TokenAuthentication])
 @permission_classes([IsAuthenticated])
 def profile_view(request):
-    """
-    GET  /api/profile/  — return current user's profile
-    PATCH /api/profile/ — update name / phone
-    """
     investor = get_investor_or_404(request.user)
     if not investor:
         return Response({"error": "Investor not found."}, status=status.HTTP_404_NOT_FOUND)
@@ -251,7 +221,6 @@ def profile_view(request):
     if request.method == "GET":
         return Response(InvestorSerializer(investor).data)
 
-    # PATCH — only allow safe fields
     allowed = {k: v for k, v in request.data.items() if k in ("name", "phone")}
     serializer = InvestorSerializer(investor, data=allowed, partial=True)
     if serializer.is_valid():
@@ -268,7 +237,6 @@ def profile_view(request):
 @authentication_classes([TokenAuthentication])
 @permission_classes([IsAuthenticated])
 def all_users(request):
-    """GET /api/users/ — list all investors (admin only)."""
     if not is_admin(request.user):
         return Response({"error": "Admin access required."}, status=status.HTTP_403_FORBIDDEN)
 
@@ -280,7 +248,6 @@ def all_users(request):
 @authentication_classes([TokenAuthentication])
 @permission_classes([IsAuthenticated])
 def delete_user(request, pk):
-    """DELETE /api/users/<pk>/delete/"""
     if not is_admin(request.user):
         return Response({"error": "Admin access required."}, status=status.HTTP_403_FORBIDDEN)
 
@@ -289,7 +256,7 @@ def delete_user(request, pk):
     except Investor.DoesNotExist:
         return Response({"error": "User not found."}, status=status.HTTP_404_NOT_FOUND)
 
-    investor.user.delete()   # cascade deletes Investor via OneToOneField
+    investor.user.delete()
     return Response({"message": "User deleted."}, status=status.HTTP_200_OK)
 
 
@@ -297,7 +264,6 @@ def delete_user(request, pk):
 @authentication_classes([TokenAuthentication])
 @permission_classes([IsAuthenticated])
 def block_user(request, pk):
-    """POST /api/users/<pk>/block/"""
     if not is_admin(request.user):
         return Response({"error": "Admin access required."}, status=status.HTTP_403_FORBIDDEN)
 
@@ -315,7 +281,6 @@ def block_user(request, pk):
 @authentication_classes([TokenAuthentication])
 @permission_classes([IsAuthenticated])
 def unblock_user(request, pk):
-    """POST /api/users/<pk>/unblock/"""
     if not is_admin(request.user):
         return Response({"error": "Admin access required."}, status=status.HTTP_403_FORBIDDEN)
 
@@ -333,7 +298,6 @@ def unblock_user(request, pk):
 @authentication_classes([TokenAuthentication])
 @permission_classes([IsAuthenticated])
 def top_investors(request):
-    """GET /api/top-investors/ — top 10 by balance (admin only)."""
     if not is_admin(request.user):
         return Response({"error": "Admin access required."}, status=status.HTTP_403_FORBIDDEN)
 
@@ -349,10 +313,6 @@ def top_investors(request):
 @authentication_classes([TokenAuthentication])
 @permission_classes([IsAuthenticated])
 def approve_investment(request, pk):
-    """
-    POST /api/investments/<pk>/approve/
-    Sets investment.approved=True and active=True.
-    """
     if not is_admin(request.user):
         return Response({"error": "Admin access required."}, status=status.HTTP_403_FORBIDDEN)
 
@@ -380,11 +340,6 @@ def approve_investment(request, pk):
 @authentication_classes([TokenAuthentication])
 @permission_classes([IsAuthenticated])
 def add_profit(request, pk):
-    """
-    POST /api/investments/<pk>/add_profit/
-    Body: { amount: float }
-    Manually credit extra profit to an investment (admin tool).
-    """
     if not is_admin(request.user):
         return Response({"error": "Admin access required."}, status=status.HTTP_403_FORBIDDEN)
 
@@ -420,11 +375,6 @@ def add_profit(request, pk):
 @authentication_classes([TokenAuthentication])
 @permission_classes([IsAuthenticated])
 def approve_deposit(request, pk):
-    """
-    POST /api/deposits/<pk>/approve/
-    Credits investor.balance and awards referral commission (5%) to referrer
-    if this is the investor's first approved deposit.
-    """
     if not is_admin(request.user):
         return Response({"error": "Admin access required."}, status=status.HTTP_403_FORBIDDEN)
 
@@ -445,7 +395,6 @@ def approve_deposit(request, pk):
         investor.balance += deposit.amount
         investor.save(update_fields=["balance"])
 
-        # ── Referral commission on first deposit ──────────────────────────────
         first_approved = (
             Deposit.objects.filter(investor=investor, status="Approved").count() == 1
         )
@@ -455,7 +404,6 @@ def approve_deposit(request, pk):
             referrer.balance += commission
             referrer.save(update_fields=["balance"])
 
-            # Update or create the Referral record with commission
             referral, _ = Referral.objects.get_or_create(
                 referrer=referrer, referred=investor
             )
@@ -483,7 +431,6 @@ def approve_deposit(request, pk):
 @authentication_classes([TokenAuthentication])
 @permission_classes([IsAuthenticated])
 def reject_deposit(request, pk):
-    """POST /api/deposits/<pk>/reject/"""
     if not is_admin(request.user):
         return Response({"error": "Admin access required."}, status=status.HTTP_403_FORBIDDEN)
 
@@ -508,11 +455,6 @@ def reject_deposit(request, pk):
 @authentication_classes([TokenAuthentication])
 @permission_classes([IsAuthenticated])
 def referral_stats(request):
-    """
-    GET /api/referrals/
-    - Admin: all referral records
-    - User: only their own referrals and earnings
-    """
     investor = get_investor_or_404(request.user)
     if not investor:
         return Response({"error": "Investor not found."}, status=status.HTTP_404_NOT_FOUND)
@@ -534,7 +476,6 @@ def referral_stats(request):
             "active_referred":   active_referred,
             "total_commission":  float(total_commission),
             "referrals":         ReferralSerializer(referrals, many=True).data,
-            # Used by Referrals.jsx to build the shareable link
             "referral_code":     investor.pk,
         }
     )
@@ -544,10 +485,6 @@ def referral_stats(request):
 @authentication_classes([TokenAuthentication])
 @permission_classes([IsAuthenticated])
 def transactions_list(request):
-    """
-    GET /api/transactions/
-    Returns all deposits + withdrawals for the requesting user (or all, if admin).
-    """
     investor = get_investor_or_404(request.user)
     if not investor:
         return Response({"error": "Investor not found."}, status=status.HTTP_404_NOT_FOUND)
@@ -571,10 +508,6 @@ def transactions_list(request):
 @authentication_classes([TokenAuthentication])
 @permission_classes([IsAuthenticated])
 def profit_history(request):
-    """
-    GET /api/profit-history/
-    Returns investment records with accumulated profit figures.
-    """
     investor = get_investor_or_404(request.user)
     if not investor:
         return Response({"error": "Investor not found."}, status=status.HTTP_404_NOT_FOUND)
@@ -594,13 +527,6 @@ def profit_history(request):
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def trigger_roi(request):
-    """
-    POST /api/trigger-roi/
-    Header: X-ROI-Secret: <ROI_TRIGGER_SECRET>
-
-    Called by cron-job.org once per day at midnight UTC.
-    Returns a summary of investments updated and matured.
-    """
     secret = request.headers.get("X-ROI-Secret", "")
     if secret != ROI_TRIGGER_SECRET:
         return Response({"error": "Unauthorized."}, status=status.HTTP_403_FORBIDDEN)
@@ -621,9 +547,6 @@ def trigger_roi(request):
 # ═════════════════════════════════════════════════════════════════════════════
 
 class InvestorViewSet(viewsets.ModelViewSet):
-    """
-    /api/investors/   — admin sees all; regular user sees only themselves.
-    """
     authentication_classes = [TokenAuthentication]
     permission_classes     = [IsAuthenticated]
     serializer_class       = InvestorSerializer
@@ -635,11 +558,6 @@ class InvestorViewSet(viewsets.ModelViewSet):
 
 
 class InvestmentViewSet(viewsets.ModelViewSet):
-    """
-    /api/investments/
-    POST — user submits a new investment (pending admin approval).
-    GET  — admin sees all; user sees their own.
-    """
     authentication_classes = [TokenAuthentication]
     permission_classes     = [IsAuthenticated]
     serializer_class       = InvestmentSerializer
@@ -657,16 +575,10 @@ class InvestmentViewSet(viewsets.ModelViewSet):
         if not investor:
             from rest_framework.exceptions import NotFound
             raise NotFound("Investor profile not found.")
-        # approved=False by default; admin must approve via /investments/<pk>/approve/
         serializer.save(investor=investor)
 
 
 class DepositViewSet(viewsets.ModelViewSet):
-    """
-    /api/deposits/
-    POST — user submits deposit + payment proof (multipart/form-data).
-    GET  — admin sees all; user sees their own.
-    """
     authentication_classes = [TokenAuthentication]
     permission_classes     = [IsAuthenticated]
     serializer_class       = DepositSerializer
@@ -688,12 +600,6 @@ class DepositViewSet(viewsets.ModelViewSet):
 
 
 class WithdrawalViewSet(viewsets.ModelViewSet):
-    """
-    /api/withdrawals/
-    POST — user requests withdrawal; deducted from balance immediately (optimistic).
-           If admin rejects it, admin must manually refund via add_profit or balance patch.
-    GET  — admin sees all; user sees their own.
-    """
     authentication_classes = [TokenAuthentication]
     permission_classes     = [IsAuthenticated]
     serializer_class       = WithdrawalSerializer
