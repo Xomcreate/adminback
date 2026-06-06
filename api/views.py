@@ -1,632 +1,526 @@
-import logging
 from datetime import timedelta
 
-from django.contrib.auth import authenticate
+from django.conf import settings
 from django.contrib.auth.models import User
-from django.db import transaction
+from django.db import models, transaction
 from django.utils import timezone
-
-from rest_framework import status, viewsets
-from rest_framework.authentication import TokenAuthentication
-from rest_framework.authtoken.models import Token
-from rest_framework.decorators import (
-    api_view,
-    authentication_classes,
-    permission_classes,
-)
-from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
+from rest_framework import viewsets, status
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
+from rest_framework import serializers as drf_serializers
 
-from .models import Deposit, Investment, Investor, Referral, Withdrawal
-from api.management.commands.apply_daily_roi import apply_daily_roi   # ← changed
-from .serializers import (
-    DepositSerializer,
-    InvestmentSerializer,
-    InvestorPublicSerializer,
-    InvestorSerializer,
-    ReferralSerializer,
-    WithdrawalSerializer,
-)
+from .models import Investor, Investment, Withdrawal
+from .serializers import InvestorSerializer, InvestmentSerializer, WithdrawalSerializer
 
-logger = logging.getLogger(__name__)
+# ── All valid investment categories ──────────────────────────────────────────
+# These are the categories a user can invest IN.
+# Tier (Silver/Gold/Diamond) is assigned automatically based on investment count.
+STOCK_CATEGORIES = [
+    # Named investment plans
+    "Silver Plan",
+    "Gold Plan",
+    "Diamond Plan",
+    # Stock companies
+    "Tesla (TSLA)",
+    "Apple (AAPL)",
+    "Amazon (AMZN)",
+    "McDonald's (MCD)",
+    "GameStop (GME)",
+    "Coca-Cola (KO)",
+    "Meta (META)",
+    "Alphabet (GOOG)",
+    "Netflix (NFLX)",
+    "Intel (INTC)",
+]
 
-REFERRAL_COMMISSION_RATE = 0.05
-ROI_TRIGGER_SECRET       = "roi-secret-key-change-in-prod"
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# HELPERS
-# ═════════════════════════════════════════════════════════════════════════════
-
-def get_investor_or_404(user):
-    try:
-        return Investor.objects.get(user=user)
-    except Investor.DoesNotExist:
-        return None
-
-
-def is_admin(user):
-    return user.is_staff or (
-        hasattr(user, "investor") and user.investor.role == "admin"
-    )
+DAILY_ROI   = 25.0   # 25% per day
+EXPIRY_DAYS = 120    # 120-day lock period
 
 
-# ═════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────
+# TIER HELPER
+# Silver  = 1–2 total investments
+# Gold    = 3–5 total investments
+# Diamond = 6+  total investments
+# ─────────────────────────────────────────────
+
+def get_tier(investment_count):
+    if investment_count >= 6:
+        return "diamond"
+    elif investment_count >= 3:
+        return "gold"
+    elif investment_count >= 1:
+        return "silver"
+    return "none"
+
+
+# ─────────────────────────────────────────────
 # AUTH
-# ═════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────
 
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def register(request):
-    username = request.data.get("username", "").strip()
-    email    = request.data.get("email",    "").strip().lower()
-    password = request.data.get("password", "")
-    ref_code = request.data.get("referral_code", None)
+    username = request.data.get("username")
+    email    = request.data.get("email")
+    password = request.data.get("password")
 
     if not username or not email or not password:
-        return Response(
-            {"error": "Username, email, and password are required."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-
+        return Response({"error": "All fields are required"}, status=400)
     if User.objects.filter(username=username).exists():
-        return Response({"error": "Username already taken."}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"error": "Username already taken"}, status=400)
+    if User.objects.filter(email=email).exists():
+        return Response({"error": "Email already registered"}, status=400)
 
-    if Investor.objects.filter(email=email).exists():
-        return Response({"error": "Email already registered."}, status=status.HTTP_400_BAD_REQUEST)
-
-    with transaction.atomic():
-        user = User.objects.create_user(username=username, email=email, password=password)
-        token, _ = Token.objects.get_or_create(user=user)
-
-        referrer = None
-        if ref_code:
-            try:
-                referrer = Investor.objects.get(pk=int(ref_code))
-            except (Investor.DoesNotExist, ValueError, TypeError):
-                pass
-
-        investor = Investor.objects.create(
-            user=user,
-            name=username,
-            email=email,
-            role="user",
-            referred_by=referrer,
-        )
-
-        if referrer:
-            Referral.objects.get_or_create(referrer=referrer, referred=investor)
-
-    return Response(
-        {
-            "message": "Account created successfully.",
-            "token":   token.key,
-            "role":    investor.role,
-            "user_id": investor.pk,
-        },
-        status=status.HTTP_201_CREATED,
+    user = User.objects.create_user(username=username, email=email, password=password)
+    Investor.objects.create(
+        user=user, name=username, email=email, phone="", role="user",
     )
+    return Response({"message": "Account created successfully"}, status=201)
 
 
-@api_view(["POST"])
-@permission_classes([AllowAny])
-def login_view(request):
-    username = request.data.get("username", "").strip()
-    password = request.data.get("password", "")
-
-    if not username or not password:
-        return Response(
-            {"error": "Username and password are required."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-
-    user = authenticate(username=username, password=password)
-    if not user:
-        return Response({"error": "Invalid credentials."}, status=status.HTTP_401_UNAUTHORIZED)
-
-    investor = get_investor_or_404(user)
-    if not investor:
-        return Response({"error": "Investor profile not found."}, status=status.HTTP_404_NOT_FOUND)
-
-    if investor.blocked:
-        return Response(
-            {"error": "Your account has been blocked. Contact support."},
-            status=status.HTTP_403_FORBIDDEN,
-        )
-
-    token, _ = Token.objects.get_or_create(user=user)
-
-    return Response(
-        {
-            "token":   token.key,
-            "role":    investor.role,
-            "user_id": investor.pk,
-            "name":    investor.name,
-        }
-    )
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# DASHBOARDS
-# ═════════════════════════════════════════════════════════════════════════════
-
-@api_view(["GET"])
-@authentication_classes([TokenAuthentication])
-@permission_classes([IsAuthenticated])
-def user_dashboard(request):
-    investor = get_investor_or_404(request.user)
-    if not investor:
-        return Response({"error": "Investor not found."}, status=status.HTTP_404_NOT_FOUND)
-
-    investments = Investment.objects.filter(investor=investor)
-    deposits    = Deposit.objects.filter(investor=investor)
-    withdrawals = Withdrawal.objects.filter(investor=investor)
-
-    active_investments = investments.filter(active=True, approved=True)
-    total_profit = sum(i.current_profit for i in active_investments)
-
-    return Response(
-        {
-            "name":                investor.name,
-            "email":               investor.email,
-            "balance":             float(investor.balance),
-            "bonus":               float(investor.bonus),
-            "tier":                investor.tier,
-            "role":                investor.role,
-            "total_invested":      float(sum(i.amount for i in investments.filter(approved=True))),
-            "total_profit":        float(total_profit),
-            "active_investments":  InvestmentSerializer(active_investments, many=True).data,
-            "pending_deposits":    DepositSerializer(deposits.filter(status="Pending"), many=True).data,
-            "recent_withdrawals":  WithdrawalSerializer(withdrawals.order_by("-created_at")[:5], many=True).data,
-            "referral_count":      investor.referrals.count(),
-        }
-    )
-
-
-@api_view(["GET"])
-@authentication_classes([TokenAuthentication])
-@permission_classes([IsAuthenticated])
-def dashboard_stats(request):
-    if not is_admin(request.user):
-        return Response({"error": "Admin access required."}, status=status.HTTP_403_FORBIDDEN)
-
-    investors   = Investor.objects.filter(role="user")
-    investments = Investment.objects.all()
-    deposits    = Deposit.objects.all()
-    withdrawals = Withdrawal.objects.all()
-
-    return Response(
-        {
-            "total_users":            investors.count(),
-            "active_investments":     investments.filter(active=True, approved=True).count(),
-            "pending_investments":    investments.filter(approved=False).count(),
-            "pending_deposits":       deposits.filter(status="Pending").count(),
-            "pending_withdrawals":    withdrawals.filter(status="Pending").count(),
-            "total_deposited":        float(sum(d.amount for d in deposits.filter(status="Approved"))),
-            "total_withdrawn":        float(sum(w.amount for w in withdrawals.filter(status="Approved"))),
-            "total_profit_paid":      float(sum(i.current_profit for i in investments.filter(active=False, approved=True))),
-            "blocked_users":          investors.filter(blocked=True).count(),
-        }
-    )
-
-
-@api_view(["GET", "PATCH"])
-@authentication_classes([TokenAuthentication])
-@permission_classes([IsAuthenticated])
-def profile_view(request):
-    investor = get_investor_or_404(request.user)
-    if not investor:
-        return Response({"error": "Investor not found."}, status=status.HTTP_404_NOT_FOUND)
-
-    if request.method == "GET":
-        return Response(InvestorSerializer(investor).data)
-
-    allowed = {k: v for k, v in request.data.items() if k in ("name", "phone")}
-    serializer = InvestorSerializer(investor, data=allowed, partial=True)
-    if serializer.is_valid():
-        serializer.save()
-        return Response(serializer.data)
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# USER MANAGEMENT  (admin only)
-# ═════════════════════════════════════════════════════════════════════════════
-
-@api_view(["GET"])
-@authentication_classes([TokenAuthentication])
-@permission_classes([IsAuthenticated])
-def all_users(request):
-    if not is_admin(request.user):
-        return Response({"error": "Admin access required."}, status=status.HTTP_403_FORBIDDEN)
-
-    investors = Investor.objects.select_related("user").order_by("-created_at")
-    return Response(InvestorPublicSerializer(investors, many=True).data)
-
-
-@api_view(["DELETE"])
-@authentication_classes([TokenAuthentication])
-@permission_classes([IsAuthenticated])
-def delete_user(request, pk):
-    if not is_admin(request.user):
-        return Response({"error": "Admin access required."}, status=status.HTTP_403_FORBIDDEN)
-
-    try:
-        investor = Investor.objects.get(pk=pk)
-    except Investor.DoesNotExist:
-        return Response({"error": "User not found."}, status=status.HTTP_404_NOT_FOUND)
-
-    investor.user.delete()
-    return Response({"message": "User deleted."}, status=status.HTTP_200_OK)
-
-
-@api_view(["POST"])
-@authentication_classes([TokenAuthentication])
-@permission_classes([IsAuthenticated])
-def block_user(request, pk):
-    if not is_admin(request.user):
-        return Response({"error": "Admin access required."}, status=status.HTTP_403_FORBIDDEN)
-
-    try:
-        investor = Investor.objects.get(pk=pk)
-    except Investor.DoesNotExist:
-        return Response({"error": "User not found."}, status=status.HTTP_404_NOT_FOUND)
-
-    investor.blocked = True
-    investor.save(update_fields=["blocked"])
-    return Response({"message": f"{investor.name} has been blocked."})
-
-
-@api_view(["POST"])
-@authentication_classes([TokenAuthentication])
-@permission_classes([IsAuthenticated])
-def unblock_user(request, pk):
-    if not is_admin(request.user):
-        return Response({"error": "Admin access required."}, status=status.HTTP_403_FORBIDDEN)
-
-    try:
-        investor = Investor.objects.get(pk=pk)
-    except Investor.DoesNotExist:
-        return Response({"error": "User not found."}, status=status.HTTP_404_NOT_FOUND)
-
-    investor.blocked = False
-    investor.save(update_fields=["blocked"])
-    return Response({"message": f"{investor.name} has been unblocked."})
-
-
-@api_view(["GET"])
-@authentication_classes([TokenAuthentication])
-@permission_classes([IsAuthenticated])
-def top_investors(request):
-    if not is_admin(request.user):
-        return Response({"error": "Admin access required."}, status=status.HTTP_403_FORBIDDEN)
-
-    investors = Investor.objects.filter(role="user").order_by("-balance")[:10]
-    return Response(InvestorPublicSerializer(investors, many=True).data)
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# INVESTMENT ADMIN ACTIONS
-# ═════════════════════════════════════════════════════════════════════════════
-
-@api_view(["POST"])
-@authentication_classes([TokenAuthentication])
-@permission_classes([IsAuthenticated])
-def approve_investment(request, pk):
-    if not is_admin(request.user):
-        return Response({"error": "Admin access required."}, status=status.HTTP_403_FORBIDDEN)
-
-    try:
-        investment = Investment.objects.select_related("investor").get(pk=pk)
-    except Investment.DoesNotExist:
-        return Response({"error": "Investment not found."}, status=status.HTTP_404_NOT_FOUND)
-
-    if investment.approved:
-        return Response({"message": "Investment already approved."})
-
-    investment.approved = True
-    investment.active   = True
-    investment.save(update_fields=["approved", "active"])
-
-    logger.info(
-        f"[APPROVED] Investment #{pk} | "
-        f"{investment.investor.name} | "
-        f"${float(investment.amount):.2f} | {investment.category}"
-    )
-    return Response({"message": "Investment approved and activated."})
-
-
-@api_view(["POST"])
-@authentication_classes([TokenAuthentication])
-@permission_classes([IsAuthenticated])
-def add_profit(request, pk):
-    if not is_admin(request.user):
-        return Response({"error": "Admin access required."}, status=status.HTTP_403_FORBIDDEN)
-
-    try:
-        investment = Investment.objects.select_related("investor").get(pk=pk)
-    except Investment.DoesNotExist:
-        return Response({"error": "Investment not found."}, status=status.HTTP_404_NOT_FOUND)
-
-    try:
-        extra = float(request.data.get("amount", 0))
-        if extra <= 0:
-            raise ValueError
-    except (ValueError, TypeError):
-        return Response({"error": "Provide a positive amount."}, status=status.HTTP_400_BAD_REQUEST)
-
-    with transaction.atomic():
-        investment.current_profit += extra
-        investment.save(update_fields=["current_profit"])
-
-    return Response(
-        {
-            "message":         f"Added ${extra:.2f} profit to investment #{pk}.",
-            "current_profit":  float(investment.current_profit),
-        }
-    )
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# DEPOSIT ADMIN ACTIONS
-# ═════════════════════════════════════════════════════════════════════════════
-
-@api_view(["POST"])
-@authentication_classes([TokenAuthentication])
-@permission_classes([IsAuthenticated])
-def approve_deposit(request, pk):
-    if not is_admin(request.user):
-        return Response({"error": "Admin access required."}, status=status.HTTP_403_FORBIDDEN)
-
-    try:
-        deposit = Deposit.objects.select_related("investor").get(pk=pk)
-    except Deposit.DoesNotExist:
-        return Response({"error": "Deposit not found."}, status=status.HTTP_404_NOT_FOUND)
-
-    if deposit.status == "Approved":
-        return Response({"message": "Deposit already approved."})
-
-    with transaction.atomic():
-        investor = Investor.objects.select_for_update().get(pk=deposit.investor.pk)
-
-        deposit.status = "Approved"
-        deposit.save(update_fields=["status"])
-
-        investor.balance += deposit.amount
-        investor.save(update_fields=["balance"])
-
-        first_approved = (
-            Deposit.objects.filter(investor=investor, status="Approved").count() == 1
-        )
-        if first_approved and investor.referred_by:
-            commission = deposit.amount * REFERRAL_COMMISSION_RATE
-            referrer   = Investor.objects.select_for_update().get(pk=investor.referred_by.pk)
-            referrer.balance += commission
-            referrer.save(update_fields=["balance"])
-
-            referral, _ = Referral.objects.get_or_create(
-                referrer=referrer, referred=investor
-            )
-            referral.commission += commission
-            referral.save(update_fields=["commission"])
-
-            logger.info(
-                f"[REFERRAL] ${commission:.2f} commission → {referrer.name} "
-                f"(referred {investor.name})"
-            )
-
-    logger.info(
-        f"[DEPOSIT APPROVED] #{pk} | "
-        f"{investor.name} | ${float(deposit.amount):.2f} | {deposit.payment_method}"
-    )
-    return Response(
-        {
-            "message":     "Deposit approved and balance credited.",
-            "new_balance": float(investor.balance),
-        }
-    )
-
-
-@api_view(["POST"])
-@authentication_classes([TokenAuthentication])
-@permission_classes([IsAuthenticated])
-def reject_deposit(request, pk):
-    if not is_admin(request.user):
-        return Response({"error": "Admin access required."}, status=status.HTTP_403_FORBIDDEN)
-
-    try:
-        deposit = Deposit.objects.get(pk=pk)
-    except Deposit.DoesNotExist:
-        return Response({"error": "Deposit not found."}, status=status.HTTP_404_NOT_FOUND)
-
-    if deposit.status != "Pending":
-        return Response({"message": f"Deposit is already {deposit.status}."})
-
-    deposit.status = "Rejected"
-    deposit.save(update_fields=["status"])
-    return Response({"message": "Deposit rejected."})
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# REPORTS
-# ═════════════════════════════════════════════════════════════════════════════
-
-@api_view(["GET"])
-@authentication_classes([TokenAuthentication])
-@permission_classes([IsAuthenticated])
-def referral_stats(request):
-    investor = get_investor_or_404(request.user)
-    if not investor:
-        return Response({"error": "Investor not found."}, status=status.HTTP_404_NOT_FOUND)
-
-    if is_admin(request.user):
-        referrals = Referral.objects.select_related("referrer", "referred").all()
-    else:
-        referrals = Referral.objects.filter(referrer=investor).select_related("referred")
-
-    total_commission = sum(r.commission for r in referrals)
-    active_referred  = sum(
-        1 for r in referrals
-        if Investment.objects.filter(investor=r.referred, active=True, approved=True).exists()
-    )
-
-    return Response(
-        {
-            "referral_count":    referrals.count(),
-            "active_referred":   active_referred,
-            "total_commission":  float(total_commission),
-            "referrals":         ReferralSerializer(referrals, many=True).data,
-            "referral_code":     investor.pk,
-        }
-    )
-
-
-@api_view(["GET"])
-@authentication_classes([TokenAuthentication])
-@permission_classes([IsAuthenticated])
-def transactions_list(request):
-    investor = get_investor_or_404(request.user)
-    if not investor:
-        return Response({"error": "Investor not found."}, status=status.HTTP_404_NOT_FOUND)
-
-    if is_admin(request.user):
-        deposits    = Deposit.objects.select_related("investor").order_by("-created_at")
-        withdrawals = Withdrawal.objects.select_related("investor").order_by("-created_at")
-    else:
-        deposits    = Deposit.objects.filter(investor=investor).order_by("-created_at")
-        withdrawals = Withdrawal.objects.filter(investor=investor).order_by("-created_at")
-
-    return Response(
-        {
-            "deposits":    DepositSerializer(deposits, many=True).data,
-            "withdrawals": WithdrawalSerializer(withdrawals, many=True).data,
-        }
-    )
-
-
-@api_view(["GET"])
-@authentication_classes([TokenAuthentication])
-@permission_classes([IsAuthenticated])
-def profit_history(request):
-    investor = get_investor_or_404(request.user)
-    if not investor:
-        return Response({"error": "Investor not found."}, status=status.HTTP_404_NOT_FOUND)
-
-    if is_admin(request.user):
-        investments = Investment.objects.select_related("investor").order_by("-created_at")
-    else:
-        investments = Investment.objects.filter(investor=investor).order_by("-created_at")
-
-    return Response(InvestmentSerializer(investments, many=True).data)
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# ROI CRON TRIGGER
-# ═════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────
+# FALLBACK WEBHOOK (for cron-job.org on free tier)
+# ─────────────────────────────────────────────
 
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def trigger_roi(request):
-    secret = request.headers.get("X-ROI-Secret", "")
-    if secret != ROI_TRIGGER_SECRET:
-        return Response({"error": "Unauthorized."}, status=status.HTTP_403_FORBIDDEN)
+    token = request.data.get("token")
+    if not token or token != settings.ROI_SECRET_TOKEN:
+        return Response({"error": "Forbidden"}, status=403)
+
+    from .tasks import apply_daily_roi
+    result = apply_daily_roi()
+    return Response({"result": result})
+
+
+# ─────────────────────────────────────────────
+# APPROVE INVESTMENT
+# ─────────────────────────────────────────────
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def approve_investment(request, pk):
+    try:
+        requester = Investor.objects.get(user=request.user)
+    except Investor.DoesNotExist:
+        return Response({"error": "Not found"}, status=404)
+
+    if requester.role != "admin":
+        return Response({"error": "Forbidden"}, status=403)
 
     try:
-        result = apply_daily_roi()
-        return Response({"message": result})
-    except Exception as exc:
-        logger.exception("ROI trigger failed")
-        return Response(
-            {"error": str(exc)},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        investment = Investment.objects.get(pk=pk)
+    except Investment.DoesNotExist:
+        return Response({"error": "Investment not found"}, status=404)
+
+    investment.approved = True
+    investment.active   = True
+    investment.save(update_fields=["approved", "active"])
+    return Response({"message": "Investment approved and activated."})
+
+
+# ─────────────────────────────────────────────
+# ADD MANUAL PROFIT
+# ─────────────────────────────────────────────
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def add_profit(request, pk):
+    """
+    Admin-only endpoint to manually add profit to an investment.
+    POST { "amount": 50000.00 }
+    - Adds to investment.current_profit
+    - Credits principal + profit to investor wallet
+    - Deactivates the investment
+    """
+    try:
+        requester = Investor.objects.get(user=request.user)
+    except Investor.DoesNotExist:
+        return Response({"error": "Not found"}, status=404)
+
+    if requester.role != "admin":
+        return Response({"error": "Forbidden"}, status=403)
+
+    try:
+        investment = Investment.objects.get(pk=pk)
+    except Investment.DoesNotExist:
+        return Response({"error": "Investment not found"}, status=404)
+
+    try:
+        amount = float(request.data.get("amount", 0))
+        if amount <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return Response({"error": "Invalid amount. Must be a positive number."}, status=400)
+
+    from decimal import Decimal
+    amount_decimal = Decimal(str(amount))
+    payout = investment.amount + investment.current_profit + amount_decimal
+
+    with transaction.atomic():
+        investment.current_profit += amount_decimal
+        investment.active = False
+        investment.save(update_fields=["current_profit", "active"])
+
+        investor = Investor.objects.select_for_update().get(pk=investment.investor.pk)
+        investor.balance += payout
+        investor.save(update_fields=["balance"])
+
+    return Response({
+        "message":        f"Profit of ${amount:.2f} added. Investment closed. ${float(payout):.2f} credited to wallet.",
+        "current_profit": float(investment.current_profit),
+        "payout":         float(payout),
+        "new_balance":    float(investor.balance),
+    })
+
+
+# ─────────────────────────────────────────────
+# DELETE REGISTERED USER
+# ─────────────────────────────────────────────
+
+@api_view(["DELETE"])
+@permission_classes([IsAuthenticated])
+def delete_user(request, pk):
+    try:
+        requester = Investor.objects.get(user=request.user)
+    except Investor.DoesNotExist:
+        return Response({"error": "Not found"}, status=404)
+
+    if requester.role != "admin":
+        return Response({"error": "Forbidden"}, status=403)
+
+    try:
+        user = User.objects.get(pk=pk)
+    except User.DoesNotExist:
+        return Response({"error": "User not found"}, status=404)
+
+    if user == request.user:
+        return Response({"error": "You cannot delete your own account."}, status=400)
+
+    user.delete()
+    return Response({"message": "User deleted successfully."})
+
+
+# ─────────────────────────────────────────────
+# DASHBOARD STATS
+# ─────────────────────────────────────────────
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def dashboard_stats(request):
+    total_users       = User.objects.count()
+    total_investments = Investment.objects.aggregate(total=models.Sum("amount"))["total"] or 0
+    total_withdrawals = Withdrawal.objects.aggregate(total=models.Sum("amount"))["total"] or 0
+    blocked_users     = Investor.objects.filter(blocked=True).count()
+
+    investment_by_category = list(
+        Investment.objects
+        .values("category")
+        .annotate(total=models.Sum("amount"), count=models.Count("id"))
+        .order_by("-total")
+    )
+
+    from django.db.models.functions import TruncMonth
+    monthly_investments = list(
+        Investment.objects
+        .annotate(month=TruncMonth("created_at"))
+        .values("month")
+        .annotate(total=models.Sum("amount"))
+        .order_by("month")
+        .values("month", "total")
+    )
+    monthly_data = [
+        {"month": e["month"].strftime("%b %Y"), "total": float(e["total"])}
+        for e in monthly_investments
+    ]
+
+    return Response({
+        "users":        total_users,
+        "investments":  float(total_investments),
+        "withdrawals":  float(total_withdrawals),
+        "blocked_users": blocked_users,
+        "investment_by_category": [
+            {"category": c["category"], "total": float(c["total"]), "count": c["count"]}
+            for c in investment_by_category
+        ],
+        "monthly_investments": monthly_data,
+    })
+
+
+# ─────────────────────────────────────────────
+# TOP INVESTORS
+# ─────────────────────────────────────────────
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def top_investors(request):
+    investors = (
+        Investor.objects
+        .filter(role="user", blocked=False)
+        .annotate(
+            total_invested   = models.Sum("investment__amount"),
+            total_profit     = models.Sum("investment__current_profit"),
+            active_plans     = models.Count(
+                "investment", filter=models.Q(investment__active=True)
+            ),
+            investment_count = models.Count("investment"),
         )
+        .filter(total_invested__isnull=False)
+        .order_by("-total_invested")[:10]
+    )
+
+    data = []
+    for rank, inv in enumerate(investors, start=1):
+        count = inv.investment_count or 0
+        data.append({
+            "rank":             rank,
+            "name":             inv.name,
+            "email":            inv.email,
+            "total_invested":   float(inv.total_invested or 0),
+            "total_profit":     float(inv.total_profit   or 0),
+            "balance":          float(inv.balance),
+            "active_plans":     inv.active_plans,
+            "tier":             get_tier(count),   # Silver 1-2 | Gold 3-5 | Diamond 6+
+            "investment_count": count,
+        })
+
+    return Response(data)
 
 
-# ═════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────
+# ALL USERS
+# ─────────────────────────────────────────────
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def all_users(request):
+    users = User.objects.all().order_by("-date_joined").values(
+        "id", "username", "email", "date_joined", "is_active"
+    )
+    return Response(list(users))
+
+
+# ─────────────────────────────────────────────
+# USER DASHBOARD
+# ─────────────────────────────────────────────
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def user_dashboard(request):
+    if request.user.is_superuser:
+        investor, _ = Investor.objects.get_or_create(
+            user=request.user,
+            defaults={
+                "name":  request.user.username,
+                "email": request.user.email or f"{request.user.username}@admin.local",
+                "role":  "admin",
+            }
+        )
+        if investor.role != "admin":
+            investor.role = "admin"
+            investor.save()
+    else:
+        try:
+            investor = Investor.objects.get(user=request.user)
+        except Investor.DoesNotExist:
+            return Response({"error": "Investor profile not found"}, status=404)
+
+    investments = Investment.objects.filter(investor=investor)
+    withdrawals = Withdrawal.objects.filter(investor=investor)
+
+    total_profits = sum(inv.current_profit for inv in investments)
+
+    profile_data = InvestorSerializer(investor).data
+    profile_data["wallet_balance"] = float(investor.balance)
+    profile_data["active_profits"] = float(total_profits)
+    profile_data["live_balance"]   = float(investor.balance) + float(total_profits)
+    profile_data["bonus"]          = float(investor.bonus)
+
+    return Response({
+        "profile":     profile_data,
+        "investments": InvestmentSerializer(investments, many=True).data,
+        "withdrawals": WithdrawalSerializer(withdrawals, many=True).data,
+    })
+
+
+# ─────────────────────────────────────────────
+# PROFILE
+# ─────────────────────────────────────────────
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def profile_view(request):
+    try:
+        investor = Investor.objects.get(user=request.user)
+    except Investor.DoesNotExist:
+        return Response({"error": "Profile not found"}, status=404)
+
+    all_investments = Investment.objects.filter(investor=investor)
+    total_profits   = sum(inv.current_profit for inv in all_investments)
+
+    # Include current tier in profile
+    investment_count = all_investments.count()
+
+    data = InvestorSerializer(investor).data
+    data["wallet_balance"]    = float(investor.balance)
+    data["active_profits"]    = float(total_profits)
+    data["live_balance"]      = float(investor.balance) + float(total_profits)
+    data["bonus"]             = float(investor.bonus)
+    data["tier"]              = get_tier(investment_count)
+    data["investment_count"]  = investment_count
+    return Response(data)
+
+
+# ─────────────────────────────────────────────
 # VIEWSETS
-# ═════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────
 
 class InvestorViewSet(viewsets.ModelViewSet):
-    authentication_classes = [TokenAuthentication]
-    permission_classes     = [IsAuthenticated]
-    serializer_class       = InvestorSerializer
+    queryset           = Investor.objects.all()
+    serializer_class   = InvestorSerializer
+    permission_classes = [IsAuthenticated]
 
-    def get_queryset(self):
-        if is_admin(self.request.user):
-            return Investor.objects.all().select_related("user")
-        return Investor.objects.filter(user=self.request.user)
+    def update(self, request, *args, **kwargs):
+        kwargs["partial"] = True
+        return super().update(request, *args, **kwargs)
+
+    def partial_update(self, request, *args, **kwargs):
+        kwargs["partial"] = True
+        return super().partial_update(request, *args, **kwargs)
 
 
 class InvestmentViewSet(viewsets.ModelViewSet):
-    authentication_classes = [TokenAuthentication]
-    permission_classes     = [IsAuthenticated]
-    serializer_class       = InvestmentSerializer
+    queryset           = Investment.objects.all()
+    serializer_class   = InvestmentSerializer
+    permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        if is_admin(self.request.user):
-            return Investment.objects.all().select_related("investor")
-        investor = get_investor_or_404(self.request.user)
-        if not investor:
+        try:
+            investor = Investor.objects.get(user=self.request.user)
+        except Investor.DoesNotExist:
             return Investment.objects.none()
-        return Investment.objects.filter(investor=investor)
+
+        if investor.role == "admin":
+            return Investment.objects.all().order_by("-created_at")
+
+        qs           = Investment.objects.filter(investor=investor).order_by("-created_at")
+        active_param = self.request.query_params.get("active")
+        if active_param == "true":
+            qs = qs.filter(active=True)
+        elif active_param == "false":
+            qs = qs.filter(active=False)
+        return qs
 
     def perform_create(self, serializer):
-        investor = get_investor_or_404(self.request.user)
-        if not investor:
-            from rest_framework.exceptions import NotFound
-            raise NotFound("Investor profile not found.")
-        serializer.save(investor=investor)
+        requester = Investor.objects.get(user=self.request.user)
 
+        investor_id = self.request.data.get("investor")
+        if investor_id and requester.role == "admin":
+            try:
+                investor = Investor.objects.get(id=investor_id)
+            except Investor.DoesNotExist:
+                investor = requester
+        else:
+            investor = requester
 
-class DepositViewSet(viewsets.ModelViewSet):
-    authentication_classes = [TokenAuthentication]
-    permission_classes     = [IsAuthenticated]
-    serializer_class       = DepositSerializer
+        # Validate category — accept any from the full list, default to Tesla (TSLA)
+        category = self.request.data.get("category", "Tesla (TSLA)")
+        if category not in STOCK_CATEGORIES:
+            category = "Tesla (TSLA)"
 
-    def get_queryset(self):
-        if is_admin(self.request.user):
-            return Deposit.objects.all().select_related("investor")
-        investor = get_investor_or_404(self.request.user)
-        if not investor:
-            return Deposit.objects.none()
-        return Deposit.objects.filter(investor=investor)
-
-    def perform_create(self, serializer):
-        investor = get_investor_or_404(self.request.user)
-        if not investor:
-            from rest_framework.exceptions import NotFound
-            raise NotFound("Investor profile not found.")
-        serializer.save(investor=investor)
+        serializer.save(
+            investor  = investor,
+            active    = False,
+            approved  = False,
+            daily_roi = DAILY_ROI,
+        )
 
 
 class WithdrawalViewSet(viewsets.ModelViewSet):
-    authentication_classes = [TokenAuthentication]
-    permission_classes     = [IsAuthenticated]
-    serializer_class       = WithdrawalSerializer
+    queryset           = Withdrawal.objects.all()
+    serializer_class   = WithdrawalSerializer
+    permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        if is_admin(self.request.user):
-            return Withdrawal.objects.all().select_related("investor")
-        investor = get_investor_or_404(self.request.user)
-        if not investor:
+        try:
+            investor = Investor.objects.get(user=self.request.user)
+        except Investor.DoesNotExist:
             return Withdrawal.objects.none()
+
+        if investor.role == "admin":
+            return Withdrawal.objects.all()
         return Withdrawal.objects.filter(investor=investor)
 
     def perform_create(self, serializer):
-        investor = get_investor_or_404(self.request.user)
-        if not investor:
-            from rest_framework.exceptions import NotFound
-            raise NotFound("Investor profile not found.")
+        try:
+            requester = Investor.objects.get(user=self.request.user)
+        except Investor.DoesNotExist:
+            raise drf_serializers.ValidationError("Investor profile not found")
 
-        amount = serializer.validated_data["amount"]
+        investor_id = self.request.data.get("investor")
+        if investor_id and requester.role == "admin":
+            try:
+                investor = Investor.objects.get(id=investor_id)
+            except Investor.DoesNotExist:
+                investor = requester
+        else:
+            investor = requester
 
-        with transaction.atomic():
-            inv = Investor.objects.select_for_update().get(pk=investor.pk)
-            if inv.balance < amount:
-                from rest_framework.exceptions import ValidationError
-                raise ValidationError(
-                    {"amount": f"Insufficient balance. Available: ${float(inv.balance):.2f}."}
+        # ── 120-day lock: block withdrawals if any active investment is still running ──
+        if requester.role != "admin":
+            lock_threshold = timezone.now() - timedelta(days=EXPIRY_DAYS)
+            locked = Investment.objects.filter(
+                investor=investor,
+                active=True,
+                approved=True,
+                created_at__gt=lock_threshold,  # started less than 120 days ago
+            ).exists()
+            if locked:
+                raise drf_serializers.ValidationError(
+                    "Withdrawals are locked until your 120-day investment period is complete."
                 )
-            inv.balance -= amount
-            inv.save(update_fields=["balance"])
-            serializer.save(investor=inv)
+
+        serializer.save(investor=investor)
+
+    def _maybe_deduct_balance(self, instance, new_status):
+        if new_status == "Approved" and instance.status == "Pending":
+            with transaction.atomic():
+                investor = Investor.objects.select_for_update().get(
+                    pk=instance.investor.pk
+                )
+                if investor.balance < instance.amount:
+                    return Response(
+                        {"error": (
+                            f"Insufficient balance. "
+                            f"Investor has ${float(investor.balance):.2f} but "
+                            f"withdrawal is ${float(instance.amount):.2f}."
+                        )},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                investor.balance -= instance.amount
+                investor.save(update_fields=["balance"])
+
+                Investment.objects.filter(
+                    investor=investor, active=True
+                ).update(active=False)
+
+        return None
+
+    def partial_update(self, request, *args, **kwargs):
+        instance = self.get_object()
+        err = self._maybe_deduct_balance(instance, request.data.get("status"))
+        if err:
+            return err
+        kwargs["partial"] = True
+        return super().partial_update(request, *args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        instance = self.get_object()
+        err = self._maybe_deduct_balance(instance, request.data.get("status"))
+        if err:
+            return err
+        kwargs["partial"] = True
+        return super().update(request, *args, **kwargs)

@@ -16,9 +16,6 @@ class Investor(models.Model):
     balance    = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     bonus      = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     blocked    = models.BooleanField(default=False)
-    referred_by = models.ForeignKey(
-        "self", null=True, blank=True, on_delete=models.SET_NULL, related_name="referrals"
-    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
@@ -28,7 +25,7 @@ class Investor(models.Model):
     def tier(self):
         count = self.investment_set.count()
         if count >= 6:
-            return "diamond"
+            return "bronze"
         elif count >= 3:
             return "gold"
         elif count >= 1:
@@ -40,7 +37,7 @@ class Investment(models.Model):
     investor       = models.ForeignKey(Investor, on_delete=models.CASCADE)
     category       = models.CharField(max_length=100, default="Tesla (TSLA)")
     amount         = models.DecimalField(max_digits=12, decimal_places=2)
-    daily_roi      = models.DecimalField(max_digits=5, decimal_places=2, default=25.0)
+    daily_roi      = models.DecimalField(max_digits=5, decimal_places=2, default=10.0)
     current_profit = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     payment_method = models.CharField(max_length=50, default="BTC")
     payment_proof  = models.ImageField(upload_to="proofs/", blank=True, null=True)
@@ -52,28 +49,6 @@ class Investment(models.Model):
         return f"{self.investor.name} - {self.category} - ${self.amount}"
 
 
-class Deposit(models.Model):
-    """
-    Tracks crypto deposit submissions from FundAccount frontend page.
-    Admin reviews payment_proof and manually credits investor.balance.
-    """
-    STATUS_CHOICES = (
-        ("Pending",  "Pending"),
-        ("Approved", "Approved"),
-        ("Rejected", "Rejected"),
-    )
-
-    investor       = models.ForeignKey(Investor, on_delete=models.CASCADE)
-    amount         = models.DecimalField(max_digits=12, decimal_places=2)
-    payment_method = models.CharField(max_length=20)          # BTC / ETH / USDT etc.
-    payment_proof  = models.ImageField(upload_to="deposits/", blank=True, null=True)
-    status         = models.CharField(max_length=20, choices=STATUS_CHOICES, default="Pending")
-    created_at     = models.DateTimeField(auto_now_add=True)
-
-    def __str__(self):
-        return f"{self.investor.name} | {self.payment_method} | ${self.amount} | {self.status}"
-
-
 class Withdrawal(models.Model):
     investor       = models.ForeignKey(Investor, on_delete=models.CASCADE)
     amount         = models.DecimalField(max_digits=12, decimal_places=2)
@@ -83,16 +58,3 @@ class Withdrawal(models.Model):
 
     def __str__(self):
         return f"{self.investor.name} - ${self.amount} - {self.status}"
-
-
-class Referral(models.Model):
-    """
-    Tracks referral relationships and commission earnings.
-    """
-    referrer       = models.ForeignKey(Investor, on_delete=models.CASCADE, related_name="referral_records")
-    referred       = models.OneToOneField(Investor, on_delete=models.CASCADE, related_name="referral_record")
-    commission     = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    created_at     = models.DateTimeField(auto_now_add=True)
-
-    def __str__(self):
-        return f"{self.referrer.name} → {self.referred.name} | ${self.commission}"
