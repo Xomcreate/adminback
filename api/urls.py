@@ -15,6 +15,9 @@ from .views import (
     add_profit,
     delete_user,
     trigger_roi,
+    change_password,        # ✅ New
+    forgot_password,        # ✅ New
+    reset_password_confirm, # ✅ New
 )
 
 router = DefaultRouter()
@@ -34,4 +37,7 @@ urlpatterns = [
     path("investments/<int:pk>/approve/",      approve_investment),
     path("investments/<int:pk>/add_profit/",   add_profit),
     path("trigger-roi/",                       trigger_roi),
+    path("change-password/",                   change_password),        # ✅ New
+    path("forgot-password/",                   forgot_password),        # ✅ New
+    path("reset-password/confirm/",            reset_password_confirm), # ✅ New
 ]

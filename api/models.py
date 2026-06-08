@@ -12,6 +12,7 @@ class Investor(models.Model):
     name       = models.CharField(max_length=100)
     email      = models.EmailField(unique=True)
     phone      = models.CharField(max_length=20, blank=True)
+    country    = models.CharField(max_length=100, blank=True, default="")  # ✅ Added
     role       = models.CharField(max_length=10, choices=ROLE_CHOICES, default="user")
     balance    = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     bonus      = models.DecimalField(max_digits=12, decimal_places=2, default=0)
@@ -25,7 +26,7 @@ class Investor(models.Model):
     def tier(self):
         count = self.investment_set.count()
         if count >= 6:
-            return "bronze"
+            return "diamond"   # ✅ Fixed: was "bronze" — should be "diamond" to match views.py logic
         elif count >= 3:
             return "gold"
         elif count >= 1:

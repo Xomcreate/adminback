@@ -2,8 +2,12 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.contrib.auth.models import User
+from django.contrib.auth.tokens import default_token_generator
+from django.core.mail import send_mail
 from django.db import models, transaction
 from django.utils import timezone
+from django.utils.encoding import force_bytes
+from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from rest_framework import viewsets, status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated, AllowAny
@@ -11,39 +15,21 @@ from rest_framework.response import Response
 from rest_framework import serializers as drf_serializers
 
 from .models import Investor, Investment, Withdrawal
-from .serializers import InvestorSerializer, InvestmentSerializer, WithdrawalSerializer
+from .serializers import (
+    InvestorSerializer, InvestmentSerializer, WithdrawalSerializer,
+    ChangePasswordSerializer, ForgotPasswordSerializer,
+)
 
-# ── All valid investment categories ──────────────────────────────────────────
-# These are the categories a user can invest IN.
-# Tier (Silver/Gold/Diamond) is assigned automatically based on investment count.
 STOCK_CATEGORIES = [
-    # Named investment plans
-    "Silver Plan",
-    "Gold Plan",
-    "Diamond Plan",
-    # Stock companies
-    "Tesla (TSLA)",
-    "Apple (AAPL)",
-    "Amazon (AMZN)",
-    "McDonald's (MCD)",
-    "GameStop (GME)",
-    "Coca-Cola (KO)",
-    "Meta (META)",
-    "Alphabet (GOOG)",
-    "Netflix (NFLX)",
-    "Intel (INTC)",
+    "Silver Plan", "Gold Plan", "Diamond Plan",
+    "Tesla (TSLA)", "Apple (AAPL)", "Amazon (AMZN)", "McDonald's (MCD)",
+    "GameStop (GME)", "Coca-Cola (KO)", "Meta (META)", "Alphabet (GOOG)",
+    "Netflix (NFLX)", "Intel (INTC)",
 ]
 
-DAILY_ROI   = 25.0   # 25% per day
-EXPIRY_DAYS = 120    # 120-day lock period
+DAILY_ROI   = 25.0
+EXPIRY_DAYS = 120
 
-
-# ─────────────────────────────────────────────
-# TIER HELPER
-# Silver  = 1–2 total investments
-# Gold    = 3–5 total investments
-# Diamond = 6+  total investments
-# ─────────────────────────────────────────────
 
 def get_tier(investment_count):
     if investment_count >= 6:
@@ -81,7 +67,114 @@ def register(request):
 
 
 # ─────────────────────────────────────────────
-# FALLBACK WEBHOOK (for cron-job.org on free tier)
+# CHANGE PASSWORD  ✅ New
+# ─────────────────────────────────────────────
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def change_password(request):
+    """
+    Authenticated user changes their own password.
+    POST { "current_password": "...", "new_password": "..." }
+    """
+    serializer = ChangePasswordSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=400)
+
+    user = request.user
+    if not user.check_password(serializer.validated_data["current_password"]):
+        return Response({"detail": "Current password is incorrect."}, status=400)
+
+    user.set_password(serializer.validated_data["new_password"])
+    user.save()
+    return Response({"message": "Password changed successfully."})
+
+
+# ─────────────────────────────────────────────
+# FORGOT PASSWORD  ✅ New
+# ─────────────────────────────────────────────
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def forgot_password(request):
+    """
+    Sends a password reset email if the email exists.
+    POST { "email": "user@example.com" }
+    Always returns 200 to avoid user-enumeration.
+    """
+    serializer = ForgotPasswordSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=400)
+
+    email = serializer.validated_data["email"]
+    generic_response = Response(
+        {"message": "If this email exists, a password reset link will be sent."}
+    )
+
+    try:
+        user = User.objects.get(email=email)
+    except User.DoesNotExist:
+        return generic_response  # Don't reveal whether the email exists
+
+    uid   = urlsafe_base64_encode(force_bytes(user.pk))
+    token = default_token_generator.make_token(user)
+
+    # Build the reset link — set FRONTEND_URL in your Django settings
+    frontend_url = getattr(settings, "FRONTEND_URL", "http://localhost:5173")
+    reset_link   = f"{frontend_url}/reset-password/{uid}/{token}/"
+
+    send_mail(
+        subject="Password Reset Request",
+        message=(
+            f"Hi {user.username},\n\n"
+            f"Click the link below to reset your password:\n{reset_link}\n\n"
+            f"If you didn't request this, ignore this email."
+        ),
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        recipient_list=[email],
+        fail_silently=True,  # Don't crash if email backend isn't configured
+    )
+
+    return generic_response
+
+
+# ─────────────────────────────────────────────
+# RESET PASSWORD (confirm)  ✅ New
+# ─────────────────────────────────────────────
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def reset_password_confirm(request):
+    """
+    Confirms the password reset from the link.
+    POST { "uid": "...", "token": "...", "new_password": "..." }
+    """
+    uid           = request.data.get("uid")
+    token         = request.data.get("token")
+    new_password  = request.data.get("new_password", "")
+
+    if not uid or not token or not new_password:
+        return Response({"error": "uid, token, and new_password are required."}, status=400)
+    if len(new_password) < 8:
+        return Response({"error": "Password must be at least 8 characters."}, status=400)
+
+    try:
+        from django.utils.encoding import force_str
+        user_pk = force_str(urlsafe_base64_decode(uid))
+        user    = User.objects.get(pk=user_pk)
+    except (User.DoesNotExist, ValueError, TypeError):
+        return Response({"error": "Invalid reset link."}, status=400)
+
+    if not default_token_generator.check_token(user, token):
+        return Response({"error": "Reset link is invalid or has expired."}, status=400)
+
+    user.set_password(new_password)
+    user.save()
+    return Response({"message": "Password reset successfully. You can now log in."})
+
+
+# ─────────────────────────────────────────────
+# FALLBACK WEBHOOK
 # ─────────────────────────────────────────────
 
 @api_view(["POST"])
@@ -129,13 +222,6 @@ def approve_investment(request, pk):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def add_profit(request, pk):
-    """
-    Admin-only endpoint to manually add profit to an investment.
-    POST { "amount": 50000.00 }
-    - Adds to investment.current_profit
-    - Credits principal + profit to investor wallet
-    - Deactivates the investment
-    """
     try:
         requester = Investor.objects.get(user=request.user)
     except Investor.DoesNotExist:
@@ -283,7 +369,7 @@ def top_investors(request):
             "total_profit":     float(inv.total_profit   or 0),
             "balance":          float(inv.balance),
             "active_plans":     inv.active_plans,
-            "tier":             get_tier(count),   # Silver 1-2 | Gold 3-5 | Diamond 6+
+            "tier":             get_tier(count),
             "investment_count": count,
         })
 
@@ -358,19 +444,17 @@ def profile_view(request):
     except Investor.DoesNotExist:
         return Response({"error": "Profile not found"}, status=404)
 
-    all_investments = Investment.objects.filter(investor=investor)
-    total_profits   = sum(inv.current_profit for inv in all_investments)
-
-    # Include current tier in profile
+    all_investments  = Investment.objects.filter(investor=investor)
+    total_profits    = sum(inv.current_profit for inv in all_investments)
     investment_count = all_investments.count()
 
     data = InvestorSerializer(investor).data
-    data["wallet_balance"]    = float(investor.balance)
-    data["active_profits"]    = float(total_profits)
-    data["live_balance"]      = float(investor.balance) + float(total_profits)
-    data["bonus"]             = float(investor.bonus)
-    data["tier"]              = get_tier(investment_count)
-    data["investment_count"]  = investment_count
+    data["wallet_balance"]   = float(investor.balance)
+    data["active_profits"]   = float(total_profits)
+    data["live_balance"]     = float(investor.balance) + float(total_profits)
+    data["bonus"]            = float(investor.bonus)
+    data["tier"]             = get_tier(investment_count)
+    data["investment_count"] = investment_count
     return Response(data)
 
 
@@ -426,7 +510,6 @@ class InvestmentViewSet(viewsets.ModelViewSet):
         else:
             investor = requester
 
-        # Validate category — accept any from the full list, default to Tesla (TSLA)
         category = self.request.data.get("category", "Tesla (TSLA)")
         if category not in STOCK_CATEGORIES:
             category = "Tesla (TSLA)"
@@ -469,14 +552,13 @@ class WithdrawalViewSet(viewsets.ModelViewSet):
         else:
             investor = requester
 
-        # ── 120-day lock: block withdrawals if any active investment is still running ──
         if requester.role != "admin":
             lock_threshold = timezone.now() - timedelta(days=EXPIRY_DAYS)
             locked = Investment.objects.filter(
                 investor=investor,
                 active=True,
                 approved=True,
-                created_at__gt=lock_threshold,  # started less than 120 days ago
+                created_at__gt=lock_threshold,
             ).exists()
             if locked:
                 raise drf_serializers.ValidationError(

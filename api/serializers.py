@@ -36,3 +36,14 @@ class WithdrawalSerializer(serializers.ModelSerializer):
         model            = Withdrawal
         fields           = "__all__"
         read_only_fields = ["investor"]
+
+
+# ✅ New: for the change-password endpoint
+class ChangePasswordSerializer(serializers.Serializer):
+    current_password = serializers.CharField(required=True)
+    new_password     = serializers.CharField(required=True, min_length=8)
+
+
+# ✅ New: for the forgot-password endpoint
+class ForgotPasswordSerializer(serializers.Serializer):
+    email = serializers.EmailField(required=True)
