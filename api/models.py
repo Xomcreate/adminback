@@ -2,6 +2,16 @@ from django.db import models
 from django.contrib.auth.models import User
 
 
+NETWORK_MAP = {
+    "BTC":  "Bitcoin Network",
+    "TRX":  "TRC-20 Network",
+    "ETH":  "ERC-20 Network",
+    "USDT": "TRC-20 / ERC-20",
+    "LTC":  "Litecoin Network",
+    "XRP":  "XRP Ledger",
+}
+
+
 class Investor(models.Model):
     ROLE_CHOICES = (
         ("admin", "Admin"),
@@ -12,7 +22,7 @@ class Investor(models.Model):
     name       = models.CharField(max_length=100)
     email      = models.EmailField(unique=True)
     phone      = models.CharField(max_length=20, blank=True)
-    country    = models.CharField(max_length=100, blank=True, default="")  # ✅ Added
+    country    = models.CharField(max_length=100, blank=True, default="")
     role       = models.CharField(max_length=10, choices=ROLE_CHOICES, default="user")
     balance    = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     bonus      = models.DecimalField(max_digits=12, decimal_places=2, default=0)
@@ -26,7 +36,7 @@ class Investor(models.Model):
     def tier(self):
         count = self.investment_set.count()
         if count >= 6:
-            return "diamond"   # ✅ Fixed: was "bronze" — should be "diamond" to match views.py logic
+            return "diamond"
         elif count >= 3:
             return "gold"
         elif count >= 1:
@@ -59,3 +69,27 @@ class Withdrawal(models.Model):
 
     def __str__(self):
         return f"{self.investor.name} - ${self.amount} - {self.status}"
+
+
+class Deposit(models.Model):
+    STATUS_CHOICES = (
+        ("pending",  "Pending"),
+        ("approved", "Approved"),
+        ("declined", "Declined"),
+    )
+
+    investor       = models.ForeignKey(
+                         Investor, on_delete=models.CASCADE, related_name="deposits"
+                     )
+    payment_method = models.CharField(max_length=10)
+    amount         = models.DecimalField(max_digits=12, decimal_places=2)
+    payment_proof  = models.ImageField(upload_to="deposit_proofs/", blank=True, null=True)
+    status         = models.CharField(max_length=10, choices=STATUS_CHOICES, default="pending")
+    created_at     = models.DateTimeField(auto_now_add=True)
+
+    @property
+    def network(self):
+        return NETWORK_MAP.get(self.payment_method, "Unknown Network")
+
+    def __str__(self):
+        return f"{self.investor.name} - {self.payment_method} - ${self.amount} - {self.status}"

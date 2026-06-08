@@ -1,8 +1,8 @@
 from rest_framework import serializers
-from .models import Investor, Investment, Withdrawal
+from .models import Investor, Investment, Withdrawal, Deposit
 
-MIN_AMOUNT = 500_000
-MAX_AMOUNT = 2_000_000
+MIN_AMOUNT = 500
+MAX_AMOUNT = 10_000_000
 
 
 class InvestorSerializer(serializers.ModelSerializer):
@@ -38,12 +38,31 @@ class WithdrawalSerializer(serializers.ModelSerializer):
         read_only_fields = ["investor"]
 
 
-# ✅ New: for the change-password endpoint
+class DepositSerializer(serializers.ModelSerializer):
+    # Flatten investor info for the admin list view
+    user    = serializers.SerializerMethodField()
+    email   = serializers.SerializerMethodField()
+    network = serializers.ReadOnlyField()
+
+    class Meta:
+        model  = Deposit
+        fields = [
+            "id", "user", "email", "payment_method", "network",
+            "amount", "payment_proof", "status", "created_at",
+        ]
+        read_only_fields = ["status", "created_at"]
+
+    def get_user(self, obj):
+        return obj.investor.name
+
+    def get_email(self, obj):
+        return obj.investor.email
+
+
 class ChangePasswordSerializer(serializers.Serializer):
     current_password = serializers.CharField(required=True)
     new_password     = serializers.CharField(required=True, min_length=8)
 
 
-# ✅ New: for the forgot-password endpoint
 class ForgotPasswordSerializer(serializers.Serializer):
     email = serializers.EmailField(required=True)

@@ -1,3 +1,4 @@
+import logging
 from datetime import timedelta
 
 from django.conf import settings
@@ -6,7 +7,7 @@ from django.contrib.auth.tokens import default_token_generator
 from django.core.mail import send_mail
 from django.db import models, transaction
 from django.utils import timezone
-from django.utils.encoding import force_bytes
+from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from rest_framework import viewsets, status
 from rest_framework.decorators import api_view, permission_classes
@@ -14,11 +15,13 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework import serializers as drf_serializers
 
-from .models import Investor, Investment, Withdrawal
+from .models import Investor, Investment, Withdrawal, Deposit
 from .serializers import (
     InvestorSerializer, InvestmentSerializer, WithdrawalSerializer,
-    ChangePasswordSerializer, ForgotPasswordSerializer,
+    DepositSerializer, ChangePasswordSerializer, ForgotPasswordSerializer,
 )
+
+logger = logging.getLogger(__name__)
 
 STOCK_CATEGORIES = [
     "Silver Plan", "Gold Plan", "Diamond Plan",
@@ -67,16 +70,12 @@ def register(request):
 
 
 # ─────────────────────────────────────────────
-# CHANGE PASSWORD  ✅ New
+# CHANGE PASSWORD
 # ─────────────────────────────────────────────
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def change_password(request):
-    """
-    Authenticated user changes their own password.
-    POST { "current_password": "...", "new_password": "..." }
-    """
     serializer = ChangePasswordSerializer(data=request.data)
     if not serializer.is_valid():
         return Response(serializer.errors, status=400)
@@ -91,17 +90,12 @@ def change_password(request):
 
 
 # ─────────────────────────────────────────────
-# FORGOT PASSWORD  ✅ New
+# FORGOT PASSWORD
 # ─────────────────────────────────────────────
 
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def forgot_password(request):
-    """
-    Sends a password reset email if the email exists.
-    POST { "email": "user@example.com" }
-    Always returns 200 to avoid user-enumeration.
-    """
     serializer = ForgotPasswordSerializer(data=request.data)
     if not serializer.is_valid():
         return Response(serializer.errors, status=400)
@@ -114,12 +108,10 @@ def forgot_password(request):
     try:
         user = User.objects.get(email=email)
     except User.DoesNotExist:
-        return generic_response  # Don't reveal whether the email exists
+        return generic_response
 
-    uid   = urlsafe_base64_encode(force_bytes(user.pk))
-    token = default_token_generator.make_token(user)
-
-    # Build the reset link — set FRONTEND_URL in your Django settings
+    uid        = urlsafe_base64_encode(force_bytes(user.pk))
+    token      = default_token_generator.make_token(user)
     frontend_url = getattr(settings, "FRONTEND_URL", "http://localhost:5173")
     reset_link   = f"{frontend_url}/reset-password/{uid}/{token}/"
 
@@ -132,26 +124,21 @@ def forgot_password(request):
         ),
         from_email=settings.DEFAULT_FROM_EMAIL,
         recipient_list=[email],
-        fail_silently=True,  # Don't crash if email backend isn't configured
+        fail_silently=True,
     )
-
     return generic_response
 
 
 # ─────────────────────────────────────────────
-# RESET PASSWORD (confirm)  ✅ New
+# RESET PASSWORD CONFIRM
 # ─────────────────────────────────────────────
 
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def reset_password_confirm(request):
-    """
-    Confirms the password reset from the link.
-    POST { "uid": "...", "token": "...", "new_password": "..." }
-    """
-    uid           = request.data.get("uid")
-    token         = request.data.get("token")
-    new_password  = request.data.get("new_password", "")
+    uid          = request.data.get("uid")
+    token        = request.data.get("token")
+    new_password = request.data.get("new_password", "")
 
     if not uid or not token or not new_password:
         return Response({"error": "uid, token, and new_password are required."}, status=400)
@@ -159,7 +146,6 @@ def reset_password_confirm(request):
         return Response({"error": "Password must be at least 8 characters."}, status=400)
 
     try:
-        from django.utils.encoding import force_str
         user_pk = force_str(urlsafe_base64_decode(uid))
         user    = User.objects.get(pk=user_pk)
     except (User.DoesNotExist, ValueError, TypeError):
@@ -264,7 +250,7 @@ def add_profit(request, pk):
 
 
 # ─────────────────────────────────────────────
-# DELETE REGISTERED USER
+# DELETE USER
 # ─────────────────────────────────────────────
 
 @api_view(["DELETE"])
@@ -416,7 +402,6 @@ def user_dashboard(request):
 
     investments = Investment.objects.filter(investor=investor)
     withdrawals = Withdrawal.objects.filter(investor=investor)
-
     total_profits = sum(inv.current_profit for inv in investments)
 
     profile_data = InvestorSerializer(investor).data
@@ -606,3 +591,107 @@ class WithdrawalViewSet(viewsets.ModelViewSet):
             return err
         kwargs["partial"] = True
         return super().update(request, *args, **kwargs)
+
+
+# ─────────────────────────────────────────────
+# DEPOSIT VIEWSET  ── NEW
+# ─────────────────────────────────────────────
+
+class DepositViewSet(viewsets.ModelViewSet):
+    """
+    GET  deposits/        → user sees own deposits; admin sees all
+    POST deposits/        → create a new deposit (multipart/form-data)
+    PATCH deposits/<id>/  → admin approves or declines { "status": "approved"|"declined" }
+    """
+    queryset           = Deposit.objects.all().order_by("-created_at")
+    serializer_class   = DepositSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        try:
+            investor = Investor.objects.get(user=self.request.user)
+        except Investor.DoesNotExist:
+            return Deposit.objects.none()
+
+        if investor.role == "admin":
+            return Deposit.objects.all().order_by("-created_at")
+        return Deposit.objects.filter(investor=investor).order_by("-created_at")
+
+    def perform_create(self, serializer):
+        try:
+            investor = Investor.objects.get(user=self.request.user)
+        except Investor.DoesNotExist:
+            raise drf_serializers.ValidationError("Investor profile not found.")
+
+        payment_method = self.request.data.get("payment_method", "")
+        valid_methods  = ["BTC", "TRX", "ETH", "USDT", "LTC", "XRP"]
+        if payment_method not in valid_methods:
+            raise drf_serializers.ValidationError(
+                f"Invalid payment method. Choose from: {', '.join(valid_methods)}."
+            )
+
+        try:
+            amount = float(self.request.data.get("amount", 0))
+            if amount < 500:
+                raise ValueError
+        except (TypeError, ValueError):
+            raise drf_serializers.ValidationError("Minimum deposit amount is $500.")
+
+        serializer.save(investor=investor, status="pending")
+
+    def partial_update(self, request, *args, **kwargs):
+        # Only admins may approve / decline
+        try:
+            requester = Investor.objects.get(user=request.user)
+        except Investor.DoesNotExist:
+            return Response({"error": "Not found."}, status=404)
+
+        if requester.role != "admin":
+            return Response({"error": "Forbidden."}, status=403)
+
+        new_status = request.data.get("status", "").lower()
+        if new_status not in ("approved", "declined"):
+            return Response(
+                {"error": "status must be 'approved' or 'declined'."},
+                status=400,
+            )
+
+        instance = self.get_object()
+
+        if instance.status != "pending":
+            return Response(
+                {"error": f"Deposit is already {instance.status}."},
+                status=400,
+            )
+
+        # Credit the investor's wallet when approved
+        if new_status == "approved":
+            with transaction.atomic():
+                investor = Investor.objects.select_for_update().get(
+                    pk=instance.investor.pk
+                )
+                investor.balance += instance.amount
+                investor.save(update_fields=["balance"])
+                instance.status = "approved"
+                instance.save(update_fields=["status"])
+
+            logger.info(
+                f"[DEPOSIT APPROVED] {instance.investor.name} | "
+                f"{instance.payment_method} | ${float(instance.amount):.2f} | "
+                f"New balance: ${float(investor.balance):.2f}"
+            )
+        else:
+            instance.status = "declined"
+            instance.save(update_fields=["status"])
+
+            logger.info(
+                f"[DEPOSIT DECLINED] {instance.investor.name} | "
+                f"{instance.payment_method} | ${float(instance.amount):.2f}"
+            )
+
+        return Response(DepositSerializer(instance).data)
+
+    # Disable full PUT — only PATCH is needed
+    def update(self, request, *args, **kwargs):
+        kwargs["partial"] = True
+        return self.partial_update(request, *args, **kwargs)
