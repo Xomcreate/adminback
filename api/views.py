@@ -23,11 +23,31 @@ from .serializers import (
 
 logger = logging.getLogger(__name__)
 
+# ── Valid category / plan lists ───────────────────────────────────────────────
+
 STOCK_CATEGORIES = [
-    "Silver Plan", "Gold Plan", "Diamond Plan",
-    "Tesla (TSLA)", "Apple (AAPL)", "Amazon (AMZN)", "McDonald's (MCD)",
-    "GameStop (GME)", "Coca-Cola (KO)", "Meta (META)", "Alphabet (GOOG)",
-    "Netflix (NFLX)", "Intel (INTC)",
+    "Shopify Inc. (SHOP)",
+    "Tesla (TSLA)",
+    "Meta (META)",
+    "Amazon (AMZN)",
+    "NVIDIA (NVDA)",
+    "Apple (AAPL)",
+    "Microsoft (MSFT)",
+    "Netflix (NFLX)",
+    "McDonald's (MCD)",
+    "GameStop (GME)",
+    "Coca-Cola (KO)",
+    "Alphabet (GOOG)",
+    "Intel (INTC)",
+]
+
+PLAN_NAMES = [
+    "Trial Plan",
+    "Essential Plan",
+    "Premium Plan",
+    "Ultimate Plan",
+    "Royal Plan",
+    "Diamond Plan",
 ]
 
 DAILY_ROI   = 25.0
@@ -100,7 +120,7 @@ def forgot_password(request):
     if not serializer.is_valid():
         return Response(serializer.errors, status=400)
 
-    email = serializer.validated_data["email"]
+    email            = serializer.validated_data["email"]
     generic_response = Response(
         {"message": "If this email exists, a password reset link will be sent."}
     )
@@ -110,8 +130,8 @@ def forgot_password(request):
     except User.DoesNotExist:
         return generic_response
 
-    uid        = urlsafe_base64_encode(force_bytes(user.pk))
-    token      = default_token_generator.make_token(user)
+    uid          = urlsafe_base64_encode(force_bytes(user.pk))
+    token        = default_token_generator.make_token(user)
     frontend_url = getattr(settings, "FRONTEND_URL", "http://localhost:5173")
     reset_link   = f"{frontend_url}/reset-password/{uid}/{token}/"
 
@@ -141,9 +161,13 @@ def reset_password_confirm(request):
     new_password = request.data.get("new_password", "")
 
     if not uid or not token or not new_password:
-        return Response({"error": "uid, token, and new_password are required."}, status=400)
+        return Response(
+            {"error": "uid, token, and new_password are required."}, status=400
+        )
     if len(new_password) < 8:
-        return Response({"error": "Password must be at least 8 characters."}, status=400)
+        return Response(
+            {"error": "Password must be at least 8 characters."}, status=400
+        )
 
     try:
         user_pk = force_str(urlsafe_base64_decode(uid))
@@ -197,7 +221,8 @@ def approve_investment(request, pk):
 
     investment.approved = True
     investment.active   = True
-    investment.save(update_fields=["approved", "active"])
+    investment.status   = "Approved"
+    investment.save(update_fields=["approved", "active", "status"])
     return Response({"message": "Investment approved and activated."})
 
 
@@ -221,12 +246,16 @@ def add_profit(request, pk):
     except Investment.DoesNotExist:
         return Response({"error": "Investment not found"}, status=404)
 
+    # Accept either "profit" (frontend) or "amount" (legacy) key
+    raw = request.data.get("profit") or request.data.get("amount", 0)
     try:
-        amount = float(request.data.get("amount", 0))
+        amount = float(raw)
         if amount <= 0:
             raise ValueError
     except (TypeError, ValueError):
-        return Response({"error": "Invalid amount. Must be a positive number."}, status=400)
+        return Response(
+            {"error": "Invalid amount. Must be a positive number."}, status=400
+        )
 
     from decimal import Decimal
     amount_decimal = Decimal(str(amount))
@@ -242,7 +271,10 @@ def add_profit(request, pk):
         investor.save(update_fields=["balance"])
 
     return Response({
-        "message":        f"Profit of ${amount:.2f} added. Investment closed. ${float(payout):.2f} credited to wallet.",
+        "message":        (
+            f"Profit of ${amount:.2f} added. Investment closed. "
+            f"${float(payout):.2f} credited to wallet."
+        ),
         "current_profit": float(investment.current_profit),
         "payout":         float(payout),
         "new_balance":    float(investor.balance),
@@ -284,9 +316,13 @@ def delete_user(request, pk):
 @permission_classes([IsAuthenticated])
 def dashboard_stats(request):
     total_users       = User.objects.count()
-    total_investments = Investment.objects.aggregate(total=models.Sum("amount"))["total"] or 0
-    total_withdrawals = Withdrawal.objects.aggregate(total=models.Sum("amount"))["total"] or 0
-    blocked_users     = Investor.objects.filter(blocked=True).count()
+    total_investments = (
+        Investment.objects.aggregate(total=models.Sum("amount"))["total"] or 0
+    )
+    total_withdrawals = (
+        Withdrawal.objects.aggregate(total=models.Sum("amount"))["total"] or 0
+    )
+    blocked_users = Investor.objects.filter(blocked=True).count()
 
     investment_by_category = list(
         Investment.objects
@@ -315,7 +351,11 @@ def dashboard_stats(request):
         "withdrawals":  float(total_withdrawals),
         "blocked_users": blocked_users,
         "investment_by_category": [
-            {"category": c["category"], "total": float(c["total"]), "count": c["count"]}
+            {
+                "category": c["category"],
+                "total":    float(c["total"]),
+                "count":    c["count"],
+            }
             for c in investment_by_category
         ],
         "monthly_investments": monthly_data,
@@ -400,8 +440,8 @@ def user_dashboard(request):
         except Investor.DoesNotExist:
             return Response({"error": "Investor profile not found"}, status=404)
 
-    investments = Investment.objects.filter(investor=investor)
-    withdrawals = Withdrawal.objects.filter(investor=investor)
+    investments   = Investment.objects.filter(investor=investor)
+    withdrawals   = Withdrawal.objects.filter(investor=investor)
     total_profits = sum(inv.current_profit for inv in investments)
 
     profile_data = InvestorSerializer(investor).data
@@ -466,15 +506,23 @@ class InvestmentViewSet(viewsets.ModelViewSet):
     serializer_class   = InvestmentSerializer
     permission_classes = [IsAuthenticated]
 
+    # ── Filtering ─────────────────────────────────────────────────────────────
+
     def get_queryset(self):
         try:
             investor = Investor.objects.get(user=self.request.user)
         except Investor.DoesNotExist:
             return Investment.objects.none()
 
+        # Admins see everything; filter by ?type= when provided
         if investor.role == "admin":
-            return Investment.objects.all().order_by("-created_at")
+            qs         = Investment.objects.all().order_by("-created_at")
+            type_param = self.request.query_params.get("type")
+            if type_param in ("stock", "plan"):
+                qs = qs.filter(type=type_param)
+            return qs
 
+        # Regular users only see their own investments
         qs           = Investment.objects.filter(investor=investor).order_by("-created_at")
         active_param = self.request.query_params.get("active")
         if active_param == "true":
@@ -483,9 +531,12 @@ class InvestmentViewSet(viewsets.ModelViewSet):
             qs = qs.filter(active=False)
         return qs
 
+    # ── Creation ──────────────────────────────────────────────────────────────
+
     def perform_create(self, serializer):
         requester = Investor.objects.get(user=self.request.user)
 
+        # Allow admin to invest on behalf of another investor
         investor_id = self.request.data.get("investor")
         if investor_id and requester.role == "admin":
             try:
@@ -495,16 +546,93 @@ class InvestmentViewSet(viewsets.ModelViewSet):
         else:
             investor = requester
 
-        category = self.request.data.get("category", "Tesla (TSLA)")
-        if category not in STOCK_CATEGORIES:
-            category = "Tesla (TSLA)"
+        # Determine investment type sent by the frontend
+        inv_type = self.request.data.get("type", "stock").lower()
+        if inv_type not in ("stock", "plan"):
+            inv_type = "stock"
 
-        serializer.save(
-            investor  = investor,
-            active    = False,
-            approved  = False,
-            daily_roi = DAILY_ROI,
-        )
+        if inv_type == "plan":
+            # ── Plan investment ───────────────────────────────────────────────
+            plan_name = self.request.data.get("plan", "").strip()
+            if plan_name not in PLAN_NAMES:
+                # Fallback: accept whatever was sent rather than hard-reject
+                plan_name = plan_name or "Trial Plan"
+
+            # category mirrors plan name for consistency with existing queries
+            category = plan_name
+
+            serializer.save(
+                investor  = investor,
+                plan      = plan_name,
+                category  = category,
+                type      = "plan",
+                active    = False,
+                approved  = False,
+                status    = "Pending",
+                daily_roi = DAILY_ROI,
+            )
+
+        else:
+            # ── Stock investment ──────────────────────────────────────────────
+            category = self.request.data.get("category", "").strip()
+
+            # Build a normalised lookup so partial matches (e.g. "Tesla (TSLA)")
+            # still resolve even if the exact string drifts between frontend versions.
+            matched = next(
+                (c for c in STOCK_CATEGORIES if c == category),
+                None,
+            )
+            if not matched:
+                # Try ticker substring match as fallback
+                matched = next(
+                    (c for c in STOCK_CATEGORIES if category and category in c),
+                    "Tesla (TSLA)",   # last-resort default
+                )
+
+            serializer.save(
+                investor  = investor,
+                category  = matched,
+                plan      = "",
+                type      = "stock",
+                active    = False,
+                approved  = False,
+                status    = "Pending",
+                daily_roi = DAILY_ROI,
+            )
+
+    # ── Approve / Decline via PATCH ───────────────────────────────────────────
+
+    def partial_update(self, request, *args, **kwargs):
+        """
+        Keeps the `status` field in sync whenever `approved` or `active` is
+        patched by the admin frontend so both flags and the status string
+        always agree.
+        """
+        instance   = self.get_object()
+        patch_data = request.data
+
+        # Derive status from explicit status key or from approved/active flags
+        new_status = patch_data.get("status")
+        if not new_status:
+            if patch_data.get("approved") is True:
+                new_status = "Approved"
+            elif patch_data.get("approved") is False or patch_data.get("active") is False:
+                new_status = patch_data.get("status", "Declined")
+
+        # Merge computed status back so the serializer saves it
+        mutable = patch_data.copy() if hasattr(patch_data, "copy") else dict(patch_data)
+        if new_status:
+            mutable["status"] = new_status
+
+        kwargs["partial"] = True
+        serializer = self.get_serializer(instance, data=mutable, partial=True)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        return Response(serializer.data)
+
+    def update(self, request, *args, **kwargs):
+        kwargs["partial"] = True
+        return self.partial_update(request, *args, **kwargs)
 
 
 class WithdrawalViewSet(viewsets.ModelViewSet):
@@ -560,11 +688,13 @@ class WithdrawalViewSet(viewsets.ModelViewSet):
                 )
                 if investor.balance < instance.amount:
                     return Response(
-                        {"error": (
-                            f"Insufficient balance. "
-                            f"Investor has ${float(investor.balance):.2f} but "
-                            f"withdrawal is ${float(instance.amount):.2f}."
-                        )},
+                        {
+                            "error": (
+                                f"Insufficient balance. "
+                                f"Investor has ${float(investor.balance):.2f} but "
+                                f"withdrawal is ${float(instance.amount):.2f}."
+                            )
+                        },
                         status=status.HTTP_400_BAD_REQUEST,
                     )
                 investor.balance -= instance.amount
@@ -594,7 +724,7 @@ class WithdrawalViewSet(viewsets.ModelViewSet):
 
 
 # ─────────────────────────────────────────────
-# DEPOSIT VIEWSET  ── NEW
+# DEPOSIT VIEWSET
 # ─────────────────────────────────────────────
 
 class DepositViewSet(viewsets.ModelViewSet):
@@ -640,7 +770,6 @@ class DepositViewSet(viewsets.ModelViewSet):
         serializer.save(investor=investor, status="pending")
 
     def partial_update(self, request, *args, **kwargs):
-        # Only admins may approve / decline
         try:
             requester = Investor.objects.get(user=request.user)
         except Investor.DoesNotExist:
@@ -664,7 +793,6 @@ class DepositViewSet(viewsets.ModelViewSet):
                 status=400,
             )
 
-        # Credit the investor's wallet when approved
         if new_status == "approved":
             with transaction.atomic():
                 investor = Investor.objects.select_for_update().get(
@@ -683,7 +811,6 @@ class DepositViewSet(viewsets.ModelViewSet):
         else:
             instance.status = "declined"
             instance.save(update_fields=["status"])
-
             logger.info(
                 f"[DEPOSIT DECLINED] {instance.investor.name} | "
                 f"{instance.payment_method} | ${float(instance.amount):.2f}"
@@ -691,7 +818,6 @@ class DepositViewSet(viewsets.ModelViewSet):
 
         return Response(DepositSerializer(instance).data)
 
-    # Disable full PUT — only PATCH is needed
     def update(self, request, *args, **kwargs):
         kwargs["partial"] = True
         return self.partial_update(request, *args, **kwargs)

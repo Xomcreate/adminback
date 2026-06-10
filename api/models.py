@@ -45,8 +45,27 @@ class Investor(models.Model):
 
 
 class Investment(models.Model):
+    TYPE_CHOICES = (
+        ("stock", "Stock"),
+        ("plan",  "Plan"),
+    )
+
+    STATUS_CHOICES = (
+        ("Pending",  "Pending"),
+        ("Approved", "Approved"),
+        ("Declined", "Declined"),
+    )
+
     investor       = models.ForeignKey(Investor, on_delete=models.CASCADE)
-    category       = models.CharField(max_length=100, default="Tesla (TSLA)")
+    # For stocks this holds the stock label e.g. "Tesla (TSLA)".
+    # For plans this mirrors the plan name for backwards compatibility.
+    category       = models.CharField(max_length=100, default="")
+    # plan stores the Investment Plan name e.g. "Trial Plan", "Royal Plan" etc.
+    plan           = models.CharField(max_length=100, blank=True, default="")
+    # type distinguishes between stock and plan investments
+    type           = models.CharField(
+                         max_length=10, choices=TYPE_CHOICES, default="stock"
+                     )
     amount         = models.DecimalField(max_digits=12, decimal_places=2)
     daily_roi      = models.DecimalField(max_digits=5, decimal_places=2, default=10.0)
     current_profit = models.DecimalField(max_digits=12, decimal_places=2, default=0)
@@ -54,10 +73,15 @@ class Investment(models.Model):
     payment_proof  = models.ImageField(upload_to="proofs/", blank=True, null=True)
     active         = models.BooleanField(default=False)
     approved       = models.BooleanField(default=False)
+    # status is the human-readable state used by the frontend
+    status         = models.CharField(
+                         max_length=20, choices=STATUS_CHOICES, default="Pending"
+                     )
     created_at     = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
-        return f"{self.investor.name} - {self.category} - ${self.amount}"
+        label = self.plan or self.category or "Investment"
+        return f"{self.investor.name} - {label} - ${self.amount}"
 
 
 class Withdrawal(models.Model):
@@ -92,4 +116,7 @@ class Deposit(models.Model):
         return NETWORK_MAP.get(self.payment_method, "Unknown Network")
 
     def __str__(self):
-        return f"{self.investor.name} - {self.payment_method} - ${self.amount} - {self.status}"
+        return (
+            f"{self.investor.name} - {self.payment_method} "
+            f"- ${self.amount} - {self.status}"
+        )

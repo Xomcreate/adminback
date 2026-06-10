@@ -16,7 +16,10 @@ EXPIRY_DAYS = 120
 
 
 class Command(BaseCommand):
-    help = "Apply 25% daily ROI to all active investments. Mature and credit wallets after 120 days."
+    help = (
+        "Apply 25% daily ROI to all active investments. "
+        "Mature and credit wallets after 120 days."
+    )
 
     def handle(self, *args, **options):
         now              = timezone.now()
@@ -34,7 +37,6 @@ class Command(BaseCommand):
 
         for investment in expiring_investments:
             with transaction.atomic():
-                # Apply one final day of ROI before closing
                 daily_gain = investment.amount * (investment.daily_roi / 100)
                 investment.current_profit += daily_gain
 
@@ -51,8 +53,10 @@ class Command(BaseCommand):
 
                 matured += 1
 
+                label = investment.plan or investment.category or "Investment"
                 self.stdout.write(
-                    f"  💰 Matured: {investor.name} | Plan: {investment.category} | "
+                    f"  💰 Matured: {investor.name} | "
+                    f"Type: {investment.type} | Label: {label} | "
                     f"Principal: ${float(investment.amount):,.2f} | "
                     f"Total Profit: ${float(investment.current_profit):,.2f} | "
                     f"Payout: ${float(payout):,.2f} credited to wallet"
@@ -71,8 +75,10 @@ class Command(BaseCommand):
                 investment.save(update_fields=["current_profit"])
                 roi_updated += 1
 
+                label = investment.plan or investment.category or "Investment"
                 self.stdout.write(
-                    f"  📈 ROI: {investment.investor.name} | {investment.category} | "
+                    f"  📈 ROI: {investment.investor.name} | "
+                    f"Type: {investment.type} | Label: {label} | "
                     f"+${float(daily_gain):,.2f} | "
                     f"Total so far: ${float(investment.current_profit):,.2f}"
                 )
@@ -80,7 +86,8 @@ class Command(BaseCommand):
         # ── Summary ───────────────────────────────────────────────────────────
         self.stdout.write(
             self.style.SUCCESS(
-                f"\n[{now.date()}] Done — {roi_updated} investment(s) updated with 25% daily ROI. "
-                f"{matured} investment(s) matured after 120 days and profits credited to wallets."
+                f"\n[{now.date()}] Done — {roi_updated} investment(s) updated "
+                f"with 25% daily ROI. {matured} investment(s) matured after "
+                f"120 days and profits credited to wallets."
             )
         )

@@ -17,13 +17,17 @@ def apply_daily_roi():
 
     ROI Policy:
       - 25% daily ROI applied every day for 120 days.
-      - At maturity (day 120): principal + all accumulated profit credited to investor wallet.
+      - At maturity (day 120): principal + all accumulated profit credited to
+        the investor's wallet.
       - Investment is then deactivated automatically.
-      - No withdrawals are permitted until the 120-day lock period has elapsed.
-      - If investor withdraws after 120 days, balance is deducted in WithdrawalViewSet.
+      - No withdrawals are permitted until the 120-day lock period elapses.
+      - If an investor withdraws after 120 days, the balance is deducted in
+        WithdrawalViewSet.
 
-    Categories are whatever the user invested in (Tesla, Apple, Silver Plan, etc.)
-    Tier (Silver/Gold/Diamond) is a separate concept assigned by investment count in views.py.
+    The `category` field holds the stock label (e.g. "Tesla (TSLA)") or the
+    plan name (e.g. "Trial Plan") depending on `type`.
+    Tier (Silver / Gold / Diamond) is a separate concept assigned by investment
+    count in views.py.
     """
     now              = timezone.now()
     expiry_threshold = now - timedelta(days=EXPIRY_DAYS)
@@ -56,9 +60,11 @@ def apply_daily_roi():
             investor.save(update_fields=["balance"])
 
             matured += 1
+
+            label = investment.plan or investment.category or "Investment"
             logger.info(
                 f"[MATURED] {investor.name} | "
-                f"Category: {investment.category} | "
+                f"Type: {investment.type} | Label: {label} | "
                 f"Principal: ${float(investment.amount):.2f} | "
                 f"Total Profit: ${float(investment.current_profit):.2f} | "
                 f"Payout: ${float(payout):.2f} | "
@@ -77,9 +83,11 @@ def apply_daily_roi():
             investment.current_profit += daily_gain
             investment.save(update_fields=["current_profit"])
             roi_updated += 1
+
+            label = investment.plan or investment.category or "Investment"
             logger.info(
                 f"[ROI] {investment.investor.name} | "
-                f"{investment.category} | "
+                f"Type: {investment.type} | Label: {label} | "
                 f"+${float(daily_gain):.2f} daily gain | "
                 f"Total profit so far: ${float(investment.current_profit):.2f}"
             )

@@ -14,10 +14,41 @@ class InvestorSerializer(serializers.ModelSerializer):
 
 
 class InvestmentSerializer(serializers.ModelSerializer):
+    # Flattened investor fields so both frontend resolvers work without
+    # needing to traverse nested objects on every row.
+    investor_name  = serializers.SerializerMethodField()
+    investor_email = serializers.SerializerMethodField()
+
     class Meta:
-        model            = Investment
-        fields           = "__all__"
-        read_only_fields = ["investor", "active", "approved", "current_profit", "daily_roi"]
+        model  = Investment
+        fields = "__all__"
+        read_only_fields = [
+            "investor",
+            "active",
+            "approved",
+            "current_profit",
+            "daily_roi",
+            "status",
+        ]
+
+    # ── investor helpers ──────────────────────────────────────────────────────
+
+    def get_investor_name(self, obj):
+        inv = obj.investor
+        if inv.name and inv.name.strip():
+            return inv.name.strip()
+        u = getattr(inv, "user", None)
+        if u:
+            full = f"{u.first_name or ''} {u.last_name or ''}".strip()
+            if full:
+                return full
+            return u.username or u.email or ""
+        return "Unknown Investor"
+
+    def get_investor_email(self, obj):
+        return obj.investor.email or ""
+
+    # ── validation ────────────────────────────────────────────────────────────
 
     def validate_amount(self, value):
         if value < MIN_AMOUNT:
