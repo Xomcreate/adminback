@@ -546,6 +546,36 @@ class InvestmentViewSet(viewsets.ModelViewSet):
         else:
             investor = requester
 
+        # Parse and validate amount early so we can check balance
+        from decimal import Decimal
+        try:
+            amount = Decimal(str(self.request.data.get("amount", 0)))
+        except Exception:
+            raise drf_serializers.ValidationError("Invalid investment amount.")
+
+        # ── BALANCE CHECK: skip for admins investing on their own account ─────
+        # Admins managing the platform don't need a funded wallet.
+        # Regular users (and admins investing on behalf of others) must have
+        # sufficient balance.
+        skip_balance_check = requester.role == "admin" and not investor_id
+        if not skip_balance_check:
+            # Re-fetch with a lock to prevent race conditions
+            with transaction.atomic():
+                locked_investor = Investor.objects.select_for_update().get(
+                    pk=investor.pk
+                )
+                if locked_investor.balance < amount:
+                    raise drf_serializers.ValidationError(
+                        f"Insufficient wallet balance. "
+                        f"Your balance is ${float(locked_investor.balance):,.2f} but "
+                        f"this investment requires ${float(amount):,.2f}. "
+                        f"Please fund your account first."
+                    )
+
+                # Deduct the investment amount from the wallet immediately
+                locked_investor.balance -= amount
+                locked_investor.save(update_fields=["balance"])
+
         # Determine investment type sent by the frontend
         inv_type = self.request.data.get("type", "stock").lower()
         if inv_type not in ("stock", "plan"):
@@ -555,7 +585,6 @@ class InvestmentViewSet(viewsets.ModelViewSet):
             # ── Plan investment ───────────────────────────────────────────────
             plan_name = self.request.data.get("plan", "").strip()
             if plan_name not in PLAN_NAMES:
-                # Fallback: accept whatever was sent rather than hard-reject
                 plan_name = plan_name or "Trial Plan"
 
             # category mirrors plan name for consistency with existing queries
@@ -576,17 +605,14 @@ class InvestmentViewSet(viewsets.ModelViewSet):
             # ── Stock investment ──────────────────────────────────────────────
             category = self.request.data.get("category", "").strip()
 
-            # Build a normalised lookup so partial matches (e.g. "Tesla (TSLA)")
-            # still resolve even if the exact string drifts between frontend versions.
             matched = next(
                 (c for c in STOCK_CATEGORIES if c == category),
                 None,
             )
             if not matched:
-                # Try ticker substring match as fallback
                 matched = next(
                     (c for c in STOCK_CATEGORIES if category and category in c),
-                    "Tesla (TSLA)",   # last-resort default
+                    "Tesla (TSLA)",
                 )
 
             serializer.save(
@@ -607,6 +633,9 @@ class InvestmentViewSet(viewsets.ModelViewSet):
         Keeps the `status` field in sync whenever `approved` or `active` is
         patched by the admin frontend so both flags and the status string
         always agree.
+
+        When an investment is Declined after being Pending, the deducted amount
+        is refunded back to the investor's wallet.
         """
         instance   = self.get_object()
         patch_data = request.data
@@ -618,6 +647,19 @@ class InvestmentViewSet(viewsets.ModelViewSet):
                 new_status = "Approved"
             elif patch_data.get("approved") is False or patch_data.get("active") is False:
                 new_status = patch_data.get("status", "Declined")
+
+        # ── REFUND on Decline: money was already deducted on creation ─────────
+        if new_status == "Declined" and instance.status == "Pending":
+            with transaction.atomic():
+                investor = Investor.objects.select_for_update().get(
+                    pk=instance.investor.pk
+                )
+                investor.balance += instance.amount
+                investor.save(update_fields=["balance"])
+                logger.info(
+                    f"[REFUND] {investor.name} | ${float(instance.amount):.2f} "
+                    f"refunded due to declined investment #{instance.pk}"
+                )
 
         # Merge computed status back so the serializer saves it
         mutable = patch_data.copy() if hasattr(patch_data, "copy") else dict(patch_data)
