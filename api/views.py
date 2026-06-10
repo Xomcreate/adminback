@@ -553,13 +553,14 @@ class InvestmentViewSet(viewsets.ModelViewSet):
         except Exception:
             raise drf_serializers.ValidationError("Invalid investment amount.")
 
-        # ── BALANCE CHECK: skip for admins investing on their own account ─────
-        # Admins managing the platform don't need a funded wallet.
-        # Regular users (and admins investing on behalf of others) must have
-        # sufficient balance.
+        # ── BALANCE CHECK ─────────────────────────────────────────────────────
+        # Admins investing on their own account skip the balance check so they
+        # can manage the platform without needing a funded wallet.
+        # All regular users (and admins investing on behalf of others) must
+        # have sufficient balance — amount is deducted immediately on creation.
         skip_balance_check = requester.role == "admin" and not investor_id
+
         if not skip_balance_check:
-            # Re-fetch with a lock to prevent race conditions
             with transaction.atomic():
                 locked_investor = Investor.objects.select_for_update().get(
                     pk=investor.pk
@@ -571,10 +572,14 @@ class InvestmentViewSet(viewsets.ModelViewSet):
                         f"this investment requires ${float(amount):,.2f}. "
                         f"Please fund your account first."
                     )
-
                 # Deduct the investment amount from the wallet immediately
                 locked_investor.balance -= amount
                 locked_investor.save(update_fields=["balance"])
+                logger.info(
+                    f"[INVEST] {locked_investor.name} | "
+                    f"${float(amount):.2f} deducted. "
+                    f"New balance: ${float(locked_investor.balance):.2f}"
+                )
 
         # Determine investment type sent by the frontend
         inv_type = self.request.data.get("type", "stock").lower()
@@ -587,13 +592,10 @@ class InvestmentViewSet(viewsets.ModelViewSet):
             if plan_name not in PLAN_NAMES:
                 plan_name = plan_name or "Trial Plan"
 
-            # category mirrors plan name for consistency with existing queries
-            category = plan_name
-
             serializer.save(
                 investor  = investor,
                 plan      = plan_name,
-                category  = category,
+                category  = plan_name,
                 type      = "plan",
                 active    = False,
                 approved  = False,
@@ -630,25 +632,40 @@ class InvestmentViewSet(viewsets.ModelViewSet):
 
     def partial_update(self, request, *args, **kwargs):
         """
-        Keeps the `status` field in sync whenever `approved` or `active` is
-        patched by the admin frontend so both flags and the status string
-        always agree.
+        Syncs status, approved, and active flags atomically.
 
-        When an investment is Declined after being Pending, the deducted amount
-        is refunded back to the investor's wallet.
+        - Approve  → approved=True, active=True, status="Approved"
+        - Decline  → approved=False, active=False, status="Declined"
+                     + refund amount back to investor wallet (if was Pending)
+
+        Because "active", "approved", and "status" are no longer read-only in
+        the serializer, these values are now actually written to the DB.
         """
         instance   = self.get_object()
         patch_data = request.data
 
-        # Derive status from explicit status key or from approved/active flags
+        # ── Derive the intended new status ────────────────────────────────────
         new_status = patch_data.get("status")
         if not new_status:
             if patch_data.get("approved") is True:
                 new_status = "Approved"
             elif patch_data.get("approved") is False or patch_data.get("active") is False:
-                new_status = patch_data.get("status", "Declined")
+                new_status = "Declined"
 
-        # ── REFUND on Decline: money was already deducted on creation ─────────
+        # ── Build a consistent payload so all three flags stay in sync ────────
+        mutable = dict(patch_data)
+        if new_status == "Approved":
+            mutable["approved"] = True
+            mutable["active"]   = True
+            mutable["status"]   = "Approved"
+        elif new_status == "Declined":
+            mutable["approved"] = False
+            mutable["active"]   = False
+            mutable["status"]   = "Declined"
+
+        # ── REFUND on Decline ─────────────────────────────────────────────────
+        # Money was deducted from the wallet when the investment was created.
+        # If the admin declines a Pending investment, refund it.
         if new_status == "Declined" and instance.status == "Pending":
             with transaction.atomic():
                 investor = Investor.objects.select_for_update().get(
@@ -658,18 +675,19 @@ class InvestmentViewSet(viewsets.ModelViewSet):
                 investor.save(update_fields=["balance"])
                 logger.info(
                     f"[REFUND] {investor.name} | ${float(instance.amount):.2f} "
-                    f"refunded due to declined investment #{instance.pk}"
+                    f"refunded — investment #{instance.pk} declined"
                 )
-
-        # Merge computed status back so the serializer saves it
-        mutable = patch_data.copy() if hasattr(patch_data, "copy") else dict(patch_data)
-        if new_status:
-            mutable["status"] = new_status
 
         kwargs["partial"] = True
         serializer = self.get_serializer(instance, data=mutable, partial=True)
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
+
+        logger.info(
+            f"[INVESTMENT UPDATE] #{instance.pk} → status={mutable.get('status')} | "
+            f"approved={mutable.get('approved')} | active={mutable.get('active')}"
+        )
+
         return Response(serializer.data)
 
     def update(self, request, *args, **kwargs):

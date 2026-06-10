@@ -24,11 +24,10 @@ class InvestmentSerializer(serializers.ModelSerializer):
         fields = "__all__"
         read_only_fields = [
             "investor",
-            "active",
-            "approved",
             "current_profit",
             "daily_roi",
-            "status",
+            # NOTE: "active", "approved", "status" are intentionally NOT read-only
+            # so that admin PATCH requests can persist approval/decline changes.
         ]
 
     # ── investor helpers ──────────────────────────────────────────────────────
