@@ -6,19 +6,21 @@ from django.contrib.auth.models import User
 from django.contrib.auth.tokens import default_token_generator
 from django.core.mail import send_mail
 from django.db import models, transaction
+from django.db.models import Sum
 from django.utils import timezone
 from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from rest_framework import viewsets, status
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, permission_classes, action
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework import serializers as drf_serializers
 
-from .models import Investor, Investment, Withdrawal, Deposit
+from .models import Investor, Investment, Withdrawal, Deposit, Referral
 from .serializers import (
     InvestorSerializer, InvestmentSerializer, WithdrawalSerializer,
     DepositSerializer, ChangePasswordSerializer, ForgotPasswordSerializer,
+    ReferralSerializer, ReferralStatsSerializer,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,6 +55,9 @@ PLAN_NAMES = [
 DAILY_ROI   = 25.0
 EXPIRY_DAYS = 120
 
+# Frontend base URL used to build referral links
+FRONTEND_URL = getattr(settings, "FRONTEND_URL", "https://admindashboard-ruddy-beta.vercel.app")
+
 
 def get_tier(investment_count):
     if investment_count >= 6:
@@ -74,6 +79,7 @@ def register(request):
     username = request.data.get("username")
     email    = request.data.get("email")
     password = request.data.get("password")
+    ref_code = request.data.get("ref", "").strip().upper()  # ?ref=XXXXXXXX
 
     if not username or not email or not password:
         return Response({"error": "All fields are required"}, status=400)
@@ -82,10 +88,48 @@ def register(request):
     if User.objects.filter(email=email).exists():
         return Response({"error": "Email already registered"}, status=400)
 
-    user = User.objects.create_user(username=username, email=email, password=password)
-    Investor.objects.create(
-        user=user, name=username, email=email, phone="", role="user",
-    )
+    with transaction.atomic():
+        user = User.objects.create_user(username=username, email=email, password=password)
+        investor = Investor.objects.create(
+            user=user, name=username, email=email, phone="", role="user",
+        )
+
+        # ── Link referral if a valid code was supplied ────────────────────────
+        if ref_code:
+            try:
+                referrer_investor = Investor.objects.get(referral_code=ref_code)
+
+                # FIX 1: Block self-referral
+                if referrer_investor.user == user:
+                    logger.warning(
+                        f"[REFERRAL] Self-referral attempt blocked for {username}"
+                    )
+                # FIX 2: Guard against duplicate referral for the same new user
+                elif Referral.objects.filter(referred_user=investor).exists():
+                    logger.warning(
+                        f"[REFERRAL] Duplicate referral blocked for {username} "
+                        f"(already has a referral source)"
+                    )
+                else:
+                    Referral.objects.create(
+                        referrer       = referrer_investor,
+                        referred_user  = investor,
+                        referred_name  = username,
+                        referred_email = email,
+                        referrer_name  = referrer_investor.name,
+                        status         = "pending",
+                        approved       = False,
+                    )
+                    logger.info(
+                        f"[REFERRAL CREATED] {referrer_investor.name} referred "
+                        f"{username} ({email})"
+                    )
+            except Investor.DoesNotExist:
+                # Invalid code — register normally, no referral created
+                logger.warning(
+                    f"[REFERRAL] Invalid ref code used at signup: {ref_code!r}"
+                )
+
     return Response({"message": "Account created successfully"}, status=201)
 
 
@@ -132,8 +176,7 @@ def forgot_password(request):
 
     uid          = urlsafe_base64_encode(force_bytes(user.pk))
     token        = default_token_generator.make_token(user)
-    frontend_url = getattr(settings, "FRONTEND_URL", "http://localhost:5173")
-    reset_link   = f"{frontend_url}/reset-password/{uid}/{token}/"
+    reset_link   = f"{FRONTEND_URL}/reset-password/{uid}/{token}/"
 
     send_mail(
         subject="Password Reset Request",
@@ -246,7 +289,6 @@ def add_profit(request, pk):
     except Investment.DoesNotExist:
         return Response({"error": "Investment not found"}, status=404)
 
-    # Accept either "profit" (frontend) or "amount" (legacy) key
     raw = request.data.get("profit") or request.data.get("amount", 0)
     try:
         amount = float(raw)
@@ -506,15 +548,12 @@ class InvestmentViewSet(viewsets.ModelViewSet):
     serializer_class   = InvestmentSerializer
     permission_classes = [IsAuthenticated]
 
-    # ── Filtering ─────────────────────────────────────────────────────────────
-
     def get_queryset(self):
         try:
             investor = Investor.objects.get(user=self.request.user)
         except Investor.DoesNotExist:
             return Investment.objects.none()
 
-        # Admins see everything; filter by ?type= when provided
         if investor.role == "admin":
             qs         = Investment.objects.all().order_by("-created_at")
             type_param = self.request.query_params.get("type")
@@ -522,7 +561,6 @@ class InvestmentViewSet(viewsets.ModelViewSet):
                 qs = qs.filter(type=type_param)
             return qs
 
-        # Regular users only see their own investments
         qs           = Investment.objects.filter(investor=investor).order_by("-created_at")
         active_param = self.request.query_params.get("active")
         if active_param == "true":
@@ -531,12 +569,9 @@ class InvestmentViewSet(viewsets.ModelViewSet):
             qs = qs.filter(active=False)
         return qs
 
-    # ── Creation ──────────────────────────────────────────────────────────────
-
     def perform_create(self, serializer):
         requester = Investor.objects.get(user=self.request.user)
 
-        # Allow admin to invest on behalf of another investor
         investor_id = self.request.data.get("investor")
         if investor_id and requester.role == "admin":
             try:
@@ -546,18 +581,12 @@ class InvestmentViewSet(viewsets.ModelViewSet):
         else:
             investor = requester
 
-        # Parse and validate amount early so we can check balance
         from decimal import Decimal
         try:
             amount = Decimal(str(self.request.data.get("amount", 0)))
         except Exception:
             raise drf_serializers.ValidationError("Invalid investment amount.")
 
-        # ── BALANCE CHECK ─────────────────────────────────────────────────────
-        # Admins investing on their own account skip the balance check so they
-        # can manage the platform without needing a funded wallet.
-        # All regular users (and admins investing on behalf of others) must
-        # have sufficient balance — amount is deducted immediately on creation.
         skip_balance_check = requester.role == "admin" and not investor_id
 
         if not skip_balance_check:
@@ -572,7 +601,6 @@ class InvestmentViewSet(viewsets.ModelViewSet):
                         f"this investment requires ${float(amount):,.2f}. "
                         f"Please fund your account first."
                     )
-                # Deduct the investment amount from the wallet immediately
                 locked_investor.balance -= amount
                 locked_investor.save(update_fields=["balance"])
                 logger.info(
@@ -581,13 +609,11 @@ class InvestmentViewSet(viewsets.ModelViewSet):
                     f"New balance: ${float(locked_investor.balance):.2f}"
                 )
 
-        # Determine investment type sent by the frontend
         inv_type = self.request.data.get("type", "stock").lower()
         if inv_type not in ("stock", "plan"):
             inv_type = "stock"
 
         if inv_type == "plan":
-            # ── Plan investment ───────────────────────────────────────────────
             plan_name = self.request.data.get("plan", "").strip()
             if plan_name not in PLAN_NAMES:
                 plan_name = plan_name or "Trial Plan"
@@ -604,7 +630,6 @@ class InvestmentViewSet(viewsets.ModelViewSet):
             )
 
         else:
-            # ── Stock investment ──────────────────────────────────────────────
             category = self.request.data.get("category", "").strip()
 
             matched = next(
@@ -628,23 +653,10 @@ class InvestmentViewSet(viewsets.ModelViewSet):
                 daily_roi = DAILY_ROI,
             )
 
-    # ── Approve / Decline via PATCH ───────────────────────────────────────────
-
     def partial_update(self, request, *args, **kwargs):
-        """
-        Syncs status, approved, and active flags atomically.
-
-        - Approve  → approved=True, active=True, status="Approved"
-        - Decline  → approved=False, active=False, status="Declined"
-                     + refund amount back to investor wallet (if was Pending)
-
-        Because "active", "approved", and "status" are no longer read-only in
-        the serializer, these values are now actually written to the DB.
-        """
         instance   = self.get_object()
         patch_data = request.data
 
-        # ── Derive the intended new status ────────────────────────────────────
         new_status = patch_data.get("status")
         if not new_status:
             if patch_data.get("approved") is True:
@@ -652,7 +664,6 @@ class InvestmentViewSet(viewsets.ModelViewSet):
             elif patch_data.get("approved") is False or patch_data.get("active") is False:
                 new_status = "Declined"
 
-        # ── Build a consistent payload so all three flags stay in sync ────────
         mutable = dict(patch_data)
         if new_status == "Approved":
             mutable["approved"] = True
@@ -663,9 +674,6 @@ class InvestmentViewSet(viewsets.ModelViewSet):
             mutable["active"]   = False
             mutable["status"]   = "Declined"
 
-        # ── REFUND on Decline ─────────────────────────────────────────────────
-        # Money was deducted from the wallet when the investment was created.
-        # If the admin declines a Pending investment, refund it.
         if new_status == "Declined" and instance.status == "Pending":
             with transaction.atomic():
                 investor = Investor.objects.select_for_update().get(
@@ -788,11 +796,6 @@ class WithdrawalViewSet(viewsets.ModelViewSet):
 # ─────────────────────────────────────────────
 
 class DepositViewSet(viewsets.ModelViewSet):
-    """
-    GET  deposits/        → user sees own deposits; admin sees all
-    POST deposits/        → create a new deposit (multipart/form-data)
-    PATCH deposits/<id>/  → admin approves or declines { "status": "approved"|"declined" }
-    """
     queryset           = Deposit.objects.all().order_by("-created_at")
     serializer_class   = DepositSerializer
     permission_classes = [IsAuthenticated]
@@ -881,3 +884,142 @@ class DepositViewSet(viewsets.ModelViewSet):
     def update(self, request, *args, **kwargs):
         kwargs["partial"] = True
         return self.partial_update(request, *args, **kwargs)
+
+
+# ─────────────────────────────────────────────
+# REFERRAL VIEWSET
+# ─────────────────────────────────────────────
+
+class ReferralViewSet(viewsets.ModelViewSet):
+    """
+    GET    referrals/              → admin: all referrals; user: their own referrals made
+    GET    referrals/my-stats/     → current user's referral stats + referral link
+    PATCH  referrals/<id>/         → admin approve / decline
+    DELETE referrals/<id>/         → admin delete record
+    """
+    serializer_class   = ReferralSerializer
+    permission_classes = [IsAuthenticated]
+
+    # ── Queryset ──────────────────────────────────────────────────────────────
+
+    def get_queryset(self):
+        try:
+            investor = Investor.objects.get(user=self.request.user)
+        except Investor.DoesNotExist:
+            return Referral.objects.none()
+
+        if investor.role == "admin":
+            return Referral.objects.all().order_by("-created_at")
+
+        # Regular users see only referrals they created
+        return Referral.objects.filter(referrer=investor).order_by("-created_at")
+
+    # ── my-stats ──────────────────────────────────────────────────────────────
+    # FIX: detail=False + url_name ensures the router never mistakes
+    # "my-stats" for a <pk> lookup.
+
+    @action(detail=False, methods=["get"], url_path="my-stats", url_name="my-stats")
+    def my_stats(self, request):
+        try:
+            investor = Investor.objects.get(user=request.user)
+        except Investor.DoesNotExist:
+            return Response({"error": "Profile not found."}, status=404)
+
+        referrals = Referral.objects.filter(referrer=investor)
+
+        total_referred   = referrals.count()
+        active_contracts = referrals.filter(status="active").count()
+
+        # FIX: use DB-side aggregate instead of Python sum() for correctness
+        # and to avoid loading all objects into memory.
+        total_earnings = (
+            referrals.filter(status="active")
+            .aggregate(total=Sum("commission"))["total"]
+            or 0
+        )
+
+        referral_link = (
+            f"{FRONTEND_URL}/dashboard/register"
+            f"?ref={investor.referral_code}"
+        )
+
+        return Response({
+            "total_referred":   total_referred,
+            "active_contracts": active_contracts,
+            "total_earnings":   float(total_earnings),
+            "referral_code":    investor.referral_code,
+            "referral_link":    referral_link,
+        })
+
+    # ── Approve / Decline via PATCH ───────────────────────────────────────────
+
+    def partial_update(self, request, *args, **kwargs):
+        try:
+            requester = Investor.objects.get(user=request.user)
+        except Investor.DoesNotExist:
+            return Response({"error": "Not found."}, status=404)
+
+        if requester.role != "admin":
+            return Response({"error": "Forbidden."}, status=403)
+
+        instance   = self.get_object()
+        new_status = request.data.get("status", "").lower()
+        approved   = request.data.get("approved")
+
+        # Infer status from approved boolean if status not given directly
+        if not new_status:
+            if approved is True or approved == "true":
+                new_status = "active"
+            elif approved is False or approved == "false":
+                new_status = "inactive"
+
+        if new_status not in ("active", "inactive", "pending", "expired"):
+            return Response(
+                {"error": "status must be one of: active, inactive, pending, expired."},
+                status=400,
+            )
+
+        with transaction.atomic():
+            # Credit commission to referrer when approving for the first time
+            if new_status == "active" and instance.status != "active":
+                referrer = Investor.objects.select_for_update().get(pk=instance.referrer.pk)
+                referrer.balance += instance.commission
+                referrer.save(update_fields=["balance"])
+                logger.info(
+                    f"[REFERRAL APPROVED] {referrer.name} | "
+                    f"Commission: ${float(instance.commission):.2f} | "
+                    f"New balance: ${float(referrer.balance):.2f}"
+                )
+
+            # Reverse commission if re-declining a previously active referral
+            elif new_status == "inactive" and instance.status == "active":
+                referrer = Investor.objects.select_for_update().get(pk=instance.referrer.pk)
+                referrer.balance = max(referrer.balance - instance.commission, 0)
+                referrer.save(update_fields=["balance"])
+                logger.info(
+                    f"[REFERRAL DECLINED] Commission reversed for {referrer.name} | "
+                    f"-${float(instance.commission):.2f}"
+                )
+
+            instance.status   = new_status
+            instance.approved = (new_status == "active")
+            instance.save(update_fields=["status", "approved"])
+
+        return Response(ReferralSerializer(instance).data)
+
+    def update(self, request, *args, **kwargs):
+        kwargs["partial"] = True
+        return self.partial_update(request, *args, **kwargs)
+
+    # ── Delete ────────────────────────────────────────────────────────────────
+
+    def destroy(self, request, *args, **kwargs):
+        try:
+            requester = Investor.objects.get(user=request.user)
+        except Investor.DoesNotExist:
+            return Response({"error": "Not found."}, status=404)
+
+        if requester.role != "admin":
+            return Response({"error": "Forbidden."}, status=403)
+
+        return super().destroy(request, *args, **kwargs)

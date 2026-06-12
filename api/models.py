@@ -29,8 +29,20 @@ class Investor(models.Model):
     blocked    = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
+    # Referral code — auto-generated on save, unique per investor
+    referral_code = models.CharField(max_length=20, unique=True, blank=True)
+
     def __str__(self):
         return self.name
+
+    def save(self, *args, **kwargs):
+        if not self.referral_code:
+            self.referral_code = self._generate_referral_code()
+        super().save(*args, **kwargs)
+
+    def _generate_referral_code(self):
+        import uuid
+        return uuid.uuid4().hex[:8].upper()
 
     @property
     def tier(self):
@@ -57,12 +69,8 @@ class Investment(models.Model):
     )
 
     investor       = models.ForeignKey(Investor, on_delete=models.CASCADE)
-    # For stocks this holds the stock label e.g. "Tesla (TSLA)".
-    # For plans this mirrors the plan name for backwards compatibility.
     category       = models.CharField(max_length=100, default="")
-    # plan stores the Investment Plan name e.g. "Trial Plan", "Royal Plan" etc.
     plan           = models.CharField(max_length=100, blank=True, default="")
-    # type distinguishes between stock and plan investments
     type           = models.CharField(
                          max_length=10, choices=TYPE_CHOICES, default="stock"
                      )
@@ -73,7 +81,6 @@ class Investment(models.Model):
     payment_proof  = models.ImageField(upload_to="proofs/", blank=True, null=True)
     active         = models.BooleanField(default=False)
     approved       = models.BooleanField(default=False)
-    # status is the human-readable state used by the frontend
     status         = models.CharField(
                          max_length=20, choices=STATUS_CHOICES, default="Pending"
                      )
@@ -119,4 +126,60 @@ class Deposit(models.Model):
         return (
             f"{self.investor.name} - {self.payment_method} "
             f"- ${self.amount} - {self.status}"
+        )
+
+
+class Referral(models.Model):
+    """
+    Tracks a referral relationship between two investors.
+
+    - referrer   : the investor who shared their referral link
+    - referred_user : the newly registered investor (nullable until they register)
+    - referred_email: email captured at sign-up for display even before profile loads
+    - status     : pending → active (approved by admin) or inactive (declined)
+    - commission : dollar amount credited to the referrer when status → active
+    - approved   : mirrors status for quick boolean checks on the frontend
+    """
+
+    STATUS_CHOICES = (
+        ("pending",  "Pending"),
+        ("active",   "Active"),
+        ("inactive", "Inactive"),
+        ("expired",  "Expired"),
+    )
+
+    COMMISSION_DEFAULT = 50.00   # $50 flat commission per approved referral
+
+    referrer      = models.ForeignKey(
+                        Investor,
+                        on_delete=models.CASCADE,
+                        related_name="referrals_made",
+                    )
+    referred_user = models.OneToOneField(
+                        Investor,
+                        on_delete=models.SET_NULL,
+                        null=True,
+                        blank=True,
+                        related_name="referral_source",
+                    )
+    # Denormalised for display even before the referred user activates
+    referred_name  = models.CharField(max_length=150, blank=True, default="")
+    referred_email = models.EmailField(blank=True, default="")
+
+    # Denormalised referrer name snapshot (admin list display)
+    referrer_name  = models.CharField(max_length=150, blank=True, default="")
+
+    status     = models.CharField(max_length=10, choices=STATUS_CHOICES, default="pending")
+    approved   = models.BooleanField(default=False)
+    commission = models.DecimalField(max_digits=10, decimal_places=2, default=COMMISSION_DEFAULT)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return (
+            f"{self.referrer.name} → "
+            f"{self.referred_name or self.referred_email or 'Unknown'} "
+            f"[{self.status}]"
         )

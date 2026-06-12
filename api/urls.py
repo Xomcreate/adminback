@@ -6,6 +6,7 @@ from .views import (
     InvestmentViewSet,
     WithdrawalViewSet,
     DepositViewSet,
+    ReferralViewSet,
     user_dashboard,
     profile_view,
     register,
@@ -26,6 +27,7 @@ router.register("investors",   InvestorViewSet,   basename="investor")
 router.register("investments", InvestmentViewSet, basename="investment")
 router.register("withdrawals", WithdrawalViewSet, basename="withdrawal")
 router.register("deposits",    DepositViewSet,    basename="deposit")
+router.register("referrals",   ReferralViewSet,   basename="referral")
 
 urlpatterns = [
     path("", include(router.urls)),
