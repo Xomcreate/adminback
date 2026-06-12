@@ -29,7 +29,13 @@ router.register("withdrawals", WithdrawalViewSet, basename="withdrawal")
 router.register("deposits",    DepositViewSet,    basename="deposit")
 router.register("referrals",   ReferralViewSet,   basename="referral")
 
+# ↓ MUST be declared before include(router.urls)
+# Without this, the router matches "my-stats" as a <pk> and returns 404
+referral_my_stats = ReferralViewSet.as_view({"get": "my_stats"})
+
 urlpatterns = [
+    path("referrals/my-stats/", referral_my_stats),  # ← before router
+
     path("", include(router.urls)),
     path("register/",                        register),
     path("user-dashboard/",                  user_dashboard),
