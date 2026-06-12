@@ -929,7 +929,7 @@ class ReferralViewSet(viewsets.ModelViewSet):
         )
 
         # FIX: correct referral link — points to /register, not /dashboard/register
-        referral_link = f"{FRONTEND_URL}/register?ref={investor.referral_code}"
+        referral_link = f"{FRONTEND_URL}/dashboard/register?ref={investor.referral_code}"
 
         return Response({
             "total_referred":   total_referred,
