@@ -79,7 +79,7 @@ def register(request):
     username = request.data.get("username")
     email    = request.data.get("email")
     password = request.data.get("password")
-    ref_code = request.data.get("ref", "").strip().upper()  # ?ref=XXXXXXXX
+    ref_code = request.data.get("ref", "").strip().upper()
 
     if not username or not email or not password:
         return Response({"error": "All fields are required"}, status=400)
@@ -99,16 +99,13 @@ def register(request):
             try:
                 referrer_investor = Investor.objects.get(referral_code=ref_code)
 
-                # FIX 1: Block self-referral
                 if referrer_investor.user == user:
                     logger.warning(
                         f"[REFERRAL] Self-referral attempt blocked for {username}"
                     )
-                # FIX 2: Guard against duplicate referral for the same new user
                 elif Referral.objects.filter(referred_user=investor).exists():
                     logger.warning(
-                        f"[REFERRAL] Duplicate referral blocked for {username} "
-                        f"(already has a referral source)"
+                        f"[REFERRAL] Duplicate referral blocked for {username}"
                     )
                 else:
                     Referral.objects.create(
@@ -125,7 +122,6 @@ def register(request):
                         f"{username} ({email})"
                     )
             except Investor.DoesNotExist:
-                # Invalid code — register normally, no referral created
                 logger.warning(
                     f"[REFERRAL] Invalid ref code used at signup: {ref_code!r}"
                 )
@@ -174,9 +170,9 @@ def forgot_password(request):
     except User.DoesNotExist:
         return generic_response
 
-    uid          = urlsafe_base64_encode(force_bytes(user.pk))
-    token        = default_token_generator.make_token(user)
-    reset_link   = f"{FRONTEND_URL}/reset-password/{uid}/{token}/"
+    uid        = urlsafe_base64_encode(force_bytes(user.pk))
+    token      = default_token_generator.make_token(user)
+    reset_link = f"{FRONTEND_URL}/reset-password/{uid}/{token}/"
 
     send_mail(
         subject="Password Reset Request",
@@ -892,15 +888,13 @@ class DepositViewSet(viewsets.ModelViewSet):
 
 class ReferralViewSet(viewsets.ModelViewSet):
     """
-    GET    referrals/              → admin: all referrals; user: their own referrals made
-    GET    referrals/my-stats/     → current user's referral stats + referral link
-    PATCH  referrals/<id>/         → admin approve / decline
-    DELETE referrals/<id>/         → admin delete record
+    GET    referrals/           → admin: all referrals; user: their own referrals made
+    GET    referrals/my-stats/  → current user's referral stats + referral link
+    PATCH  referrals/<id>/      → admin approve / decline
+    DELETE referrals/<id>/      → admin delete record
     """
     serializer_class   = ReferralSerializer
     permission_classes = [IsAuthenticated]
-
-    # ── Queryset ──────────────────────────────────────────────────────────────
 
     def get_queryset(self):
         try:
@@ -915,8 +909,6 @@ class ReferralViewSet(viewsets.ModelViewSet):
         return Referral.objects.filter(referrer=investor).order_by("-created_at")
 
     # ── my-stats ──────────────────────────────────────────────────────────────
-    # FIX: detail=False + url_name ensures the router never mistakes
-    # "my-stats" for a <pk> lookup.
 
     @action(detail=False, methods=["get"], url_path="my-stats", url_name="my-stats")
     def my_stats(self, request):
@@ -930,18 +922,14 @@ class ReferralViewSet(viewsets.ModelViewSet):
         total_referred   = referrals.count()
         active_contracts = referrals.filter(status="active").count()
 
-        # FIX: use DB-side aggregate instead of Python sum() for correctness
-        # and to avoid loading all objects into memory.
         total_earnings = (
             referrals.filter(status="active")
             .aggregate(total=Sum("commission"))["total"]
             or 0
         )
 
-        referral_link = (
-            f"{FRONTEND_URL}/dashboard/register"
-            f"?ref={investor.referral_code}"
-        )
+        # FIX: correct referral link — points to /register, not /dashboard/register
+        referral_link = f"{FRONTEND_URL}/register?ref={investor.referral_code}"
 
         return Response({
             "total_referred":   total_referred,
@@ -966,7 +954,6 @@ class ReferralViewSet(viewsets.ModelViewSet):
         new_status = request.data.get("status", "").lower()
         approved   = request.data.get("approved")
 
-        # Infer status from approved boolean if status not given directly
         if not new_status:
             if approved is True or approved == "true":
                 new_status = "active"
@@ -980,7 +967,6 @@ class ReferralViewSet(viewsets.ModelViewSet):
             )
 
         with transaction.atomic():
-            # Credit commission to referrer when approving for the first time
             if new_status == "active" and instance.status != "active":
                 referrer = Investor.objects.select_for_update().get(pk=instance.referrer.pk)
                 referrer.balance += instance.commission
@@ -991,7 +977,6 @@ class ReferralViewSet(viewsets.ModelViewSet):
                     f"New balance: ${float(referrer.balance):.2f}"
                 )
 
-            # Reverse commission if re-declining a previously active referral
             elif new_status == "inactive" and instance.status == "active":
                 referrer = Investor.objects.select_for_update().get(pk=instance.referrer.pk)
                 referrer.balance = max(referrer.balance - instance.commission, 0)
