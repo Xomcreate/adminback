@@ -16,11 +16,15 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework import serializers as drf_serializers
 
-from .models import Investor, Investment, Withdrawal, Deposit, Referral
+from .models import (
+    Investor, Investment, Withdrawal, Deposit, Referral,
+    CopyTradingSubscription, COPY_TRADING_PLAN_PRICES, COPY_TRADING_PLAN_DEPOSITS,
+)
 from .serializers import (
     InvestorSerializer, InvestmentSerializer, WithdrawalSerializer,
     DepositSerializer, ChangePasswordSerializer, ForgotPasswordSerializer,
     ReferralSerializer, ReferralStatsSerializer,
+    CopyTradingSubscriptionSerializer,
 )
 
 logger = logging.getLogger(__name__)
@@ -928,7 +932,6 @@ class ReferralViewSet(viewsets.ModelViewSet):
             or 0
         )
 
-        # FIX: correct referral link — points to /register, not /dashboard/register
         referral_link = f"{FRONTEND_URL}/register?ref={investor.referral_code}"
 
         return Response({
@@ -1007,4 +1010,136 @@ class ReferralViewSet(viewsets.ModelViewSet):
         if requester.role != "admin":
             return Response({"error": "Forbidden."}, status=403)
 
+        return super().destroy(request, *args, **kwargs)
+
+
+# ─────────────────────────────────────────────
+# COPY TRADING VIEWSET
+# ─────────────────────────────────────────────
+
+class CopyTradingSubscriptionViewSet(viewsets.ModelViewSet):
+    """
+    GET    copy-trading-subscriptions/       → admin: all; user: own
+    POST   copy-trading-subscriptions/       → user subscribes to a plan
+    PATCH  copy-trading-subscriptions/<id>/  → admin approve / decline
+    DELETE copy-trading-subscriptions/<id>/  → admin delete
+    """
+    serializer_class   = CopyTradingSubscriptionSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        try:
+            investor = Investor.objects.get(user=self.request.user)
+        except Investor.DoesNotExist:
+            return CopyTradingSubscription.objects.none()
+
+        if investor.role == "admin":
+            return CopyTradingSubscription.objects.all().order_by("-created_at")
+
+        return CopyTradingSubscription.objects.filter(
+            investor=investor
+        ).order_by("-created_at")
+
+    def perform_create(self, serializer):
+        try:
+            investor = Investor.objects.get(user=self.request.user)
+        except Investor.DoesNotExist:
+            raise drf_serializers.ValidationError("Investor profile not found.")
+
+        plan = self.request.data.get("plan", "").strip()
+        valid_plans = list(COPY_TRADING_PLAN_PRICES.keys())
+        if plan not in valid_plans:
+            raise drf_serializers.ValidationError(
+                f"Invalid plan. Choose from: {', '.join(valid_plans)}."
+            )
+
+        # Block duplicate active subscriptions for regular users
+        if investor.role != "admin":
+            existing = CopyTradingSubscription.objects.filter(
+                investor=investor,
+                active=True,
+            ).exists()
+            if existing:
+                raise drf_serializers.ValidationError(
+                    "You already have an active copy trading subscription."
+                )
+
+        copied_trader = self.request.data.get("copied_trader", "").strip()
+
+        plan_fee       = COPY_TRADING_PLAN_PRICES.get(plan, 0)
+        deposit_amount = COPY_TRADING_PLAN_DEPOSITS.get(plan, 0)
+
+        serializer.save(
+            investor       = investor,
+            plan           = plan,
+            plan_fee       = plan_fee,
+            deposit_amount = deposit_amount,
+            copied_trader  = copied_trader,
+            status         = "Pending",
+            approved       = False,
+            active         = False,
+        )
+
+        logger.info(
+            f"[COPY TRADING] {investor.name} subscribed to {plan} plan "
+            f"(fee=${plan_fee}, deposit=${deposit_amount})"
+        )
+
+    def partial_update(self, request, *args, **kwargs):
+        try:
+            requester = Investor.objects.get(user=request.user)
+        except Investor.DoesNotExist:
+            return Response({"error": "Not found."}, status=404)
+
+        if requester.role != "admin":
+            return Response({"error": "Forbidden."}, status=403)
+
+        instance = self.get_object()
+
+        # Resolve new status from either explicit status field or approved bool
+        new_status = request.data.get("status", "").strip()
+        approved   = request.data.get("approved")
+
+        if not new_status:
+            if approved is True or approved == "true" or approved == True:
+                new_status = "Approved"
+            elif approved is False or approved == "false" or approved == False:
+                new_status = "Declined"
+
+        if new_status not in ("Approved", "Declined", "Pending"):
+            return Response(
+                {"error": "status must be one of: Approved, Declined, Pending."},
+                status=400,
+            )
+
+        instance.status   = new_status
+        instance.approved = (new_status == "Approved")
+        instance.active   = (new_status == "Approved")
+        instance.save(update_fields=["status", "approved", "active"])
+
+        logger.info(
+            f"[COPY TRADING UPDATE] #{instance.pk} → {new_status} "
+            f"for {instance.investor.name}"
+        )
+
+        return Response(CopyTradingSubscriptionSerializer(instance).data)
+
+    def update(self, request, *args, **kwargs):
+        kwargs["partial"] = True
+        return self.partial_update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        try:
+            requester = Investor.objects.get(user=request.user)
+        except Investor.DoesNotExist:
+            return Response({"error": "Not found."}, status=404)
+
+        if requester.role != "admin":
+            return Response({"error": "Forbidden."}, status=403)
+
+        instance = self.get_object()
+        logger.info(
+            f"[COPY TRADING DELETED] #{instance.pk} — "
+            f"{instance.investor.name} / {instance.plan}"
+        )
         return super().destroy(request, *args, **kwargs)

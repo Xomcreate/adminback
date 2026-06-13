@@ -132,13 +132,6 @@ class Deposit(models.Model):
 class Referral(models.Model):
     """
     Tracks a referral relationship between two investors.
-
-    - referrer   : the investor who shared their referral link
-    - referred_user : the newly registered investor (nullable until they register)
-    - referred_email: email captured at sign-up for display even before profile loads
-    - status     : pending → active (approved by admin) or inactive (declined)
-    - commission : dollar amount credited to the referrer when status → active
-    - approved   : mirrors status for quick boolean checks on the frontend
     """
 
     STATUS_CHOICES = (
@@ -148,7 +141,7 @@ class Referral(models.Model):
         ("expired",  "Expired"),
     )
 
-    COMMISSION_DEFAULT = 50.00   # $50 flat commission per approved referral
+    COMMISSION_DEFAULT = 50.00
 
     referrer      = models.ForeignKey(
                         Investor,
@@ -162,11 +155,8 @@ class Referral(models.Model):
                         blank=True,
                         related_name="referral_source",
                     )
-    # Denormalised for display even before the referred user activates
     referred_name  = models.CharField(max_length=150, blank=True, default="")
     referred_email = models.EmailField(blank=True, default="")
-
-    # Denormalised referrer name snapshot (admin list display)
     referrer_name  = models.CharField(max_length=150, blank=True, default="")
 
     status     = models.CharField(max_length=10, choices=STATUS_CHOICES, default="pending")
@@ -183,3 +173,75 @@ class Referral(models.Model):
             f"{self.referred_name or self.referred_email or 'Unknown'} "
             f"[{self.status}]"
         )
+
+
+# ─────────────────────────────────────────────
+# COPY TRADING
+# ─────────────────────────────────────────────
+
+COPY_TRADING_PLAN_CHOICES = (
+    ("Starter",       "Starter"),
+    ("Pro",           "Pro"),
+    ("Institutional", "Institutional"),
+)
+
+COPY_TRADING_STATUS_CHOICES = (
+    ("Pending",  "Pending"),
+    ("Approved", "Approved"),
+    ("Declined", "Declined"),
+)
+
+COPY_TRADING_PLAN_PRICES = {
+    "Starter":       49,
+    "Pro":           149,
+    "Institutional": 499,
+}
+
+COPY_TRADING_PLAN_DEPOSITS = {
+    "Starter":       500,
+    "Pro":           2000,
+    "Institutional": 10000,
+}
+
+
+class CopyTradingSubscription(models.Model):
+    """
+    Tracks a user's copy trading plan subscription.
+
+    One active subscription per investor (enforced at create time in the view).
+    Admin can approve / decline / delete records.
+    """
+
+    investor   = models.ForeignKey(
+                     Investor,
+                     on_delete=models.CASCADE,
+                     related_name="copy_trading_subscriptions",
+                 )
+    plan       = models.CharField(
+                     max_length=20,
+                     choices=COPY_TRADING_PLAN_CHOICES,
+                     default="Starter",
+                 )
+    status     = models.CharField(
+                     max_length=20,
+                     choices=COPY_TRADING_STATUS_CHOICES,
+                     default="Pending",
+                 )
+    approved   = models.BooleanField(default=False)
+    active     = models.BooleanField(default=False)
+
+    # Snapshot amounts so historical records stay accurate even if plan prices change
+    plan_fee       = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    deposit_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+    # Trader being copied (optional — stores trader name from frontend static list)
+    copied_trader  = models.CharField(max_length=100, blank=True, default="")
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.investor.name} — {self.plan} [{self.status}]"

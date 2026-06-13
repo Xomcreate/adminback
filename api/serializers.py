@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Investor, Investment, Withdrawal, Deposit, Referral
+from .models import Investor, Investment, Withdrawal, Deposit, Referral, CopyTradingSubscription
 
 MIN_AMOUNT = 500
 MAX_AMOUNT = 10_000_000
@@ -24,8 +24,6 @@ class InvestmentSerializer(serializers.ModelSerializer):
             "investor",
             "current_profit",
             "daily_roi",
-            # NOTE: "active", "approved", "status" are intentionally NOT read-only
-            # so that admin PATCH requests can persist approval/decline changes.
         ]
 
     def get_investor_name(self, obj):
@@ -96,13 +94,6 @@ class ForgotPasswordSerializer(serializers.Serializer):
 # ─────────────────────────────────────────────
 
 class ReferralSerializer(serializers.ModelSerializer):
-    """
-    Full read serializer — exposes nested referrer/referred objects so the
-    frontend resolver helpers (resolveUserName, resolveReferrerName, etc.)
-    work without changes.
-    """
-
-    # Nested snapshots for the frontend resolvers
     referrer      = serializers.SerializerMethodField()
     referred_user = serializers.SerializerMethodField()
 
@@ -120,18 +111,15 @@ class ReferralSerializer(serializers.ModelSerializer):
             "commission",
             "created_at",
         ]
-        # FIX: commission is read-only — clients must not be able to set
-        # a custom commission amount via the API.
         read_only_fields = [
             "created_at",
             "referrer_name",
             "referred_name",
             "referred_email",
-            "commission",       # ← added
+            "commission",
         ]
 
     def get_referrer(self, obj):
-        """Return a minimal dict matching what the frontend resolveReferrerName helper expects."""
         r = obj.referrer
         return {
             "id":         r.id,
@@ -142,7 +130,6 @@ class ReferralSerializer(serializers.ModelSerializer):
         }
 
     def get_referred_user(self, obj):
-        """Return a minimal dict matching what the frontend resolveUserName helper expects."""
         if not obj.referred_user:
             return None
         u = obj.referred_user
@@ -157,9 +144,72 @@ class ReferralSerializer(serializers.ModelSerializer):
 
 
 class ReferralStatsSerializer(serializers.Serializer):
-    """Used by the /referrals/my-stats/ endpoint."""
     total_referred   = serializers.IntegerField()
     active_contracts = serializers.IntegerField()
     total_earnings   = serializers.DecimalField(max_digits=12, decimal_places=2)
     referral_code    = serializers.CharField()
     referral_link    = serializers.CharField()
+
+
+# ─────────────────────────────────────────────
+# COPY TRADING SERIALIZER
+# ─────────────────────────────────────────────
+
+class CopyTradingSubscriptionSerializer(serializers.ModelSerializer):
+    """
+    Serializer for CopyTradingSubscription.
+
+    Exposes investor name + email as read-only fields so the admin
+    table can show them without a separate lookup.
+    """
+
+    user_name  = serializers.SerializerMethodField()
+    user_email = serializers.SerializerMethodField()
+
+    # Nested minimal user object — mirrors the shape the frontend
+    # resolveUserName / resolveUserEmail helpers expect.
+    user = serializers.SerializerMethodField()
+
+    class Meta:
+        model  = CopyTradingSubscription
+        fields = [
+            "id",
+            "investor",
+            "user",          # nested dict for frontend resolver helpers
+            "user_name",     # flat shortcut
+            "user_email",    # flat shortcut
+            "plan",
+            "status",
+            "approved",
+            "active",
+            "plan_fee",
+            "deposit_amount",
+            "copied_trader",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "investor",
+            "plan_fee",
+            "deposit_amount",
+            "created_at",
+            "updated_at",
+        ]
+
+    def get_user_name(self, obj):
+        inv = obj.investor
+        return inv.name or inv.email or "Unknown"
+
+    def get_user_email(self, obj):
+        return obj.investor.email or ""
+
+    def get_user(self, obj):
+        inv = obj.investor
+        return {
+            "id":         inv.id,
+            "first_name": "",
+            "last_name":  "",
+            "full_name":  inv.name,
+            "username":   inv.name,
+            "email":      inv.email,
+        }

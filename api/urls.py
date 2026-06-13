@@ -7,6 +7,7 @@ from .views import (
     WithdrawalViewSet,
     DepositViewSet,
     ReferralViewSet,
+    CopyTradingSubscriptionViewSet,   # ← NEW
     user_dashboard,
     profile_view,
     register,
@@ -23,11 +24,12 @@ from .views import (
 )
 
 router = DefaultRouter()
-router.register("investors",   InvestorViewSet,   basename="investor")
-router.register("investments", InvestmentViewSet, basename="investment")
-router.register("withdrawals", WithdrawalViewSet, basename="withdrawal")
-router.register("deposits",    DepositViewSet,    basename="deposit")
-router.register("referrals",   ReferralViewSet,   basename="referral")
+router.register("investors",                   InvestorViewSet,                  basename="investor")
+router.register("investments",                 InvestmentViewSet,                basename="investment")
+router.register("withdrawals",                 WithdrawalViewSet,                basename="withdrawal")
+router.register("deposits",                    DepositViewSet,                   basename="deposit")
+router.register("referrals",                   ReferralViewSet,                  basename="referral")
+router.register("copy-trading-subscriptions",  CopyTradingSubscriptionViewSet,   basename="copy-trading-subscription")  # ← NEW
 
 # FIX: Manually wire my-stats BEFORE including router URLs so Django never
 # tries to resolve "my-stats" as a <pk> integer lookup.
@@ -41,9 +43,9 @@ urlpatterns = [
     path("", include(router.urls)),
 
     # ── Auth ──────────────────────────────────────────────────────────────
-    path("register/",              register),
-    path("change-password/",       change_password),
-    path("forgot-password/",       forgot_password),
+    path("register/",               register),
+    path("change-password/",        change_password),
+    path("forgot-password/",        forgot_password),
     path("reset-password/confirm/", reset_password_confirm),
 
     # ── Dashboard / profile ───────────────────────────────────────────────
