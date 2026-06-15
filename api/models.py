@@ -29,7 +29,6 @@ class Investor(models.Model):
     blocked    = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
-    # Referral code — auto-generated on save, unique per investor
     referral_code = models.CharField(max_length=20, unique=True, blank=True)
 
     def __str__(self):
@@ -61,7 +60,6 @@ class Investment(models.Model):
         ("stock", "Stock"),
         ("plan",  "Plan"),
     )
-
     STATUS_CHOICES = (
         ("Pending",  "Pending"),
         ("Approved", "Approved"),
@@ -71,9 +69,7 @@ class Investment(models.Model):
     investor       = models.ForeignKey(Investor, on_delete=models.CASCADE)
     category       = models.CharField(max_length=100, default="")
     plan           = models.CharField(max_length=100, blank=True, default="")
-    type           = models.CharField(
-                         max_length=10, choices=TYPE_CHOICES, default="stock"
-                     )
+    type           = models.CharField(max_length=10, choices=TYPE_CHOICES, default="stock")
     amount         = models.DecimalField(max_digits=12, decimal_places=2)
     daily_roi      = models.DecimalField(max_digits=5, decimal_places=2, default=10.0)
     current_profit = models.DecimalField(max_digits=12, decimal_places=2, default=0)
@@ -81,9 +77,7 @@ class Investment(models.Model):
     payment_proof  = models.ImageField(upload_to="proofs/", blank=True, null=True)
     active         = models.BooleanField(default=False)
     approved       = models.BooleanField(default=False)
-    status         = models.CharField(
-                         max_length=20, choices=STATUS_CHOICES, default="Pending"
-                     )
+    status         = models.CharField(max_length=20, choices=STATUS_CHOICES, default="Pending")
     created_at     = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
@@ -109,9 +103,7 @@ class Deposit(models.Model):
         ("declined", "Declined"),
     )
 
-    investor       = models.ForeignKey(
-                         Investor, on_delete=models.CASCADE, related_name="deposits"
-                     )
+    investor       = models.ForeignKey(Investor, on_delete=models.CASCADE, related_name="deposits")
     payment_method = models.CharField(max_length=10)
     amount         = models.DecimalField(max_digits=12, decimal_places=2)
     payment_proof  = models.ImageField(upload_to="deposit_proofs/", blank=True, null=True)
@@ -123,38 +115,22 @@ class Deposit(models.Model):
         return NETWORK_MAP.get(self.payment_method, "Unknown Network")
 
     def __str__(self):
-        return (
-            f"{self.investor.name} - {self.payment_method} "
-            f"- ${self.amount} - {self.status}"
-        )
+        return f"{self.investor.name} - {self.payment_method} - ${self.amount} - {self.status}"
 
 
 class Referral(models.Model):
-    """
-    Tracks a referral relationship between two investors.
-    """
-
     STATUS_CHOICES = (
         ("pending",  "Pending"),
         ("active",   "Active"),
         ("inactive", "Inactive"),
         ("expired",  "Expired"),
     )
-
     COMMISSION_DEFAULT = 50.00
 
-    referrer      = models.ForeignKey(
-                        Investor,
-                        on_delete=models.CASCADE,
-                        related_name="referrals_made",
-                    )
+    referrer      = models.ForeignKey(Investor, on_delete=models.CASCADE, related_name="referrals_made")
     referred_user = models.OneToOneField(
-                        Investor,
-                        on_delete=models.SET_NULL,
-                        null=True,
-                        blank=True,
-                        related_name="referral_source",
-                    )
+        Investor, on_delete=models.SET_NULL, null=True, blank=True, related_name="referral_source"
+    )
     referred_name  = models.CharField(max_length=150, blank=True, default="")
     referred_email = models.EmailField(blank=True, default="")
     referrer_name  = models.CharField(max_length=150, blank=True, default="")
@@ -184,19 +160,16 @@ COPY_TRADING_PLAN_CHOICES = (
     ("Pro",           "Pro"),
     ("Institutional", "Institutional"),
 )
-
 COPY_TRADING_STATUS_CHOICES = (
     ("Pending",  "Pending"),
     ("Approved", "Approved"),
     ("Declined", "Declined"),
 )
-
 COPY_TRADING_PLAN_PRICES = {
     "Starter":       49,
     "Pro":           149,
     "Institutional": 499,
 }
-
 COPY_TRADING_PLAN_DEPOSITS = {
     "Starter":       500,
     "Pro":           2000,
@@ -205,36 +178,14 @@ COPY_TRADING_PLAN_DEPOSITS = {
 
 
 class CopyTradingSubscription(models.Model):
-    """
-    Tracks a user's copy trading plan subscription.
-
-    One active subscription per investor (enforced at create time in the view).
-    Admin can approve / decline / delete records.
-    """
-
-    investor   = models.ForeignKey(
-                     Investor,
-                     on_delete=models.CASCADE,
-                     related_name="copy_trading_subscriptions",
-                 )
-    plan       = models.CharField(
-                     max_length=20,
-                     choices=COPY_TRADING_PLAN_CHOICES,
-                     default="Starter",
-                 )
-    status     = models.CharField(
-                     max_length=20,
-                     choices=COPY_TRADING_STATUS_CHOICES,
-                     default="Pending",
-                 )
+    investor   = models.ForeignKey(Investor, on_delete=models.CASCADE, related_name="copy_trading_subscriptions")
+    plan       = models.CharField(max_length=20, choices=COPY_TRADING_PLAN_CHOICES, default="Starter")
+    status     = models.CharField(max_length=20, choices=COPY_TRADING_STATUS_CHOICES, default="Pending")
     approved   = models.BooleanField(default=False)
     active     = models.BooleanField(default=False)
 
-    # Snapshot amounts so historical records stay accurate even if plan prices change
     plan_fee       = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     deposit_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-
-    # Trader being copied (optional — stores trader name from frontend static list)
     copied_trader  = models.CharField(max_length=100, blank=True, default="")
 
     created_at = models.DateTimeField(auto_now_add=True)
@@ -245,3 +196,60 @@ class CopyTradingSubscription(models.Model):
 
     def __str__(self):
         return f"{self.investor.name} — {self.plan} [{self.status}]"
+
+
+# ─────────────────────────────────────────────
+# BOT SUBSCRIPTIONS
+# ─────────────────────────────────────────────
+
+BOT_SUBSCRIPTION_PLAN_CHOICES = (
+    ("Starter",       "Starter"),
+    ("Pro",           "Pro"),
+    ("Institutional", "Institutional"),
+)
+BOT_SUBSCRIPTION_STATUS_CHOICES = (
+    ("Pending",  "Pending"),
+    ("Approved", "Approved"),
+    ("Declined", "Declined"),
+)
+BOT_BILLING_PERIOD_CHOICES = (
+    ("weekly",  "Weekly"),
+    ("monthly", "Monthly"),
+    ("yearly",  "Yearly"),
+)
+
+BOT_PLAN_PRICES = {
+    "weekly":  {"Starter": 15,   "Pro": 40,   "Institutional": 130},
+    "monthly": {"Starter": 49,   "Pro": 149,  "Institutional": 499},
+    "yearly":  {"Starter": 410,  "Pro": 1250, "Institutional": 4190},
+}
+BOT_PLAN_DEPOSITS = {
+    "Starter":       500,
+    "Pro":           2000,
+    "Institutional": 10000,
+}
+
+
+class BotSubscription(models.Model):
+    """
+    Tracks a user's AI trading bot plan subscription.
+    Admin can approve / decline / delete records.
+    """
+    investor       = models.ForeignKey(Investor, on_delete=models.CASCADE, related_name="bot_subscriptions")
+    plan           = models.CharField(max_length=20, choices=BOT_SUBSCRIPTION_PLAN_CHOICES, default="Starter")
+    billing_period = models.CharField(max_length=10, choices=BOT_BILLING_PERIOD_CHOICES, default="monthly")
+    status         = models.CharField(max_length=20, choices=BOT_SUBSCRIPTION_STATUS_CHOICES, default="Pending")
+    approved       = models.BooleanField(default=False)
+    active         = models.BooleanField(default=False)
+
+    plan_fee       = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    deposit_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.investor.name} — {self.plan} / {self.billing_period} [{self.status}]"

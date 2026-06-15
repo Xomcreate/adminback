@@ -19,47 +19,31 @@ from rest_framework import serializers as drf_serializers
 from .models import (
     Investor, Investment, Withdrawal, Deposit, Referral,
     CopyTradingSubscription, COPY_TRADING_PLAN_PRICES, COPY_TRADING_PLAN_DEPOSITS,
+    BotSubscription, BOT_PLAN_PRICES, BOT_PLAN_DEPOSITS,
 )
 from .serializers import (
     InvestorSerializer, InvestmentSerializer, WithdrawalSerializer,
     DepositSerializer, ChangePasswordSerializer, ForgotPasswordSerializer,
     ReferralSerializer, ReferralStatsSerializer,
     CopyTradingSubscriptionSerializer,
+    BotSubscriptionSerializer,
 )
 
 logger = logging.getLogger(__name__)
 
-# ── Valid category / plan lists ───────────────────────────────────────────────
-
 STOCK_CATEGORIES = [
-    "Shopify Inc. (SHOP)",
-    "Tesla (TSLA)",
-    "Meta (META)",
-    "Amazon (AMZN)",
-    "NVIDIA (NVDA)",
-    "Apple (AAPL)",
-    "Microsoft (MSFT)",
-    "Netflix (NFLX)",
-    "McDonald's (MCD)",
-    "GameStop (GME)",
-    "Coca-Cola (KO)",
-    "Alphabet (GOOG)",
-    "Intel (INTC)",
+    "Shopify Inc. (SHOP)", "Tesla (TSLA)", "Meta (META)", "Amazon (AMZN)",
+    "NVIDIA (NVDA)", "Apple (AAPL)", "Microsoft (MSFT)", "Netflix (NFLX)",
+    "McDonald's (MCD)", "GameStop (GME)", "Coca-Cola (KO)", "Alphabet (GOOG)", "Intel (INTC)",
 ]
-
 PLAN_NAMES = [
-    "Trial Plan",
-    "Essential Plan",
-    "Premium Plan",
-    "Ultimate Plan",
-    "Royal Plan",
-    "Diamond Plan",
+    "Trial Plan", "Essential Plan", "Premium Plan",
+    "Ultimate Plan", "Royal Plan", "Diamond Plan",
 ]
 
 DAILY_ROI   = 25.0
 EXPIRY_DAYS = 120
 
-# Frontend base URL used to build referral links
 FRONTEND_URL = getattr(settings, "FRONTEND_URL", "https://admindashboard-ruddy-beta.vercel.app")
 
 
@@ -93,42 +77,25 @@ def register(request):
         return Response({"error": "Email already registered"}, status=400)
 
     with transaction.atomic():
-        user = User.objects.create_user(username=username, email=email, password=password)
-        investor = Investor.objects.create(
-            user=user, name=username, email=email, phone="", role="user",
-        )
+        user     = User.objects.create_user(username=username, email=email, password=password)
+        investor = Investor.objects.create(user=user, name=username, email=email, phone="", role="user")
 
-        # ── Link referral if a valid code was supplied ────────────────────────
         if ref_code:
             try:
                 referrer_investor = Investor.objects.get(referral_code=ref_code)
-
                 if referrer_investor.user == user:
-                    logger.warning(
-                        f"[REFERRAL] Self-referral attempt blocked for {username}"
-                    )
+                    logger.warning(f"[REFERRAL] Self-referral attempt blocked for {username}")
                 elif Referral.objects.filter(referred_user=investor).exists():
-                    logger.warning(
-                        f"[REFERRAL] Duplicate referral blocked for {username}"
-                    )
+                    logger.warning(f"[REFERRAL] Duplicate referral blocked for {username}")
                 else:
                     Referral.objects.create(
-                        referrer       = referrer_investor,
-                        referred_user  = investor,
-                        referred_name  = username,
-                        referred_email = email,
-                        referrer_name  = referrer_investor.name,
-                        status         = "pending",
-                        approved       = False,
+                        referrer=referrer_investor, referred_user=investor,
+                        referred_name=username, referred_email=email,
+                        referrer_name=referrer_investor.name, status="pending", approved=False,
                     )
-                    logger.info(
-                        f"[REFERRAL CREATED] {referrer_investor.name} referred "
-                        f"{username} ({email})"
-                    )
+                    logger.info(f"[REFERRAL CREATED] {referrer_investor.name} referred {username} ({email})")
             except Investor.DoesNotExist:
-                logger.warning(
-                    f"[REFERRAL] Invalid ref code used at signup: {ref_code!r}"
-                )
+                logger.warning(f"[REFERRAL] Invalid ref code used at signup: {ref_code!r}")
 
     return Response({"message": "Account created successfully"}, status=201)
 
@@ -143,11 +110,9 @@ def change_password(request):
     serializer = ChangePasswordSerializer(data=request.data)
     if not serializer.is_valid():
         return Response(serializer.errors, status=400)
-
     user = request.user
     if not user.check_password(serializer.validated_data["current_password"]):
         return Response({"detail": "Current password is incorrect."}, status=400)
-
     user.set_password(serializer.validated_data["new_password"])
     user.save()
     return Response({"message": "Password changed successfully."})
@@ -165,9 +130,7 @@ def forgot_password(request):
         return Response(serializer.errors, status=400)
 
     email            = serializer.validated_data["email"]
-    generic_response = Response(
-        {"message": "If this email exists, a password reset link will be sent."}
-    )
+    generic_response = Response({"message": "If this email exists, a password reset link will be sent."})
 
     try:
         user = User.objects.get(email=email)
@@ -204,13 +167,9 @@ def reset_password_confirm(request):
     new_password = request.data.get("new_password", "")
 
     if not uid or not token or not new_password:
-        return Response(
-            {"error": "uid, token, and new_password are required."}, status=400
-        )
+        return Response({"error": "uid, token, and new_password are required."}, status=400)
     if len(new_password) < 8:
-        return Response(
-            {"error": "Password must be at least 8 characters."}, status=400
-        )
+        return Response({"error": "Password must be at least 8 characters."}, status=400)
 
     try:
         user_pk = force_str(urlsafe_base64_decode(uid))
@@ -236,7 +195,6 @@ def trigger_roi(request):
     token = request.data.get("token")
     if not token or token != settings.ROI_SECRET_TOKEN:
         return Response({"error": "Forbidden"}, status=403)
-
     from .tasks import apply_daily_roi
     result = apply_daily_roi()
     return Response({"result": result})
@@ -253,10 +211,8 @@ def approve_investment(request, pk):
         requester = Investor.objects.get(user=request.user)
     except Investor.DoesNotExist:
         return Response({"error": "Not found"}, status=404)
-
     if requester.role != "admin":
         return Response({"error": "Forbidden"}, status=403)
-
     try:
         investment = Investment.objects.get(pk=pk)
     except Investment.DoesNotExist:
@@ -280,10 +236,8 @@ def add_profit(request, pk):
         requester = Investor.objects.get(user=request.user)
     except Investor.DoesNotExist:
         return Response({"error": "Not found"}, status=404)
-
     if requester.role != "admin":
         return Response({"error": "Forbidden"}, status=403)
-
     try:
         investment = Investment.objects.get(pk=pk)
     except Investment.DoesNotExist:
@@ -295,9 +249,7 @@ def add_profit(request, pk):
         if amount <= 0:
             raise ValueError
     except (TypeError, ValueError):
-        return Response(
-            {"error": "Invalid amount. Must be a positive number."}, status=400
-        )
+        return Response({"error": "Invalid amount. Must be a positive number."}, status=400)
 
     from decimal import Decimal
     amount_decimal = Decimal(str(amount))
@@ -313,10 +265,7 @@ def add_profit(request, pk):
         investor.save(update_fields=["balance"])
 
     return Response({
-        "message":        (
-            f"Profit of ${amount:.2f} added. Investment closed. "
-            f"${float(payout):.2f} credited to wallet."
-        ),
+        "message":        f"Profit of ${amount:.2f} added. Investment closed. ${float(payout):.2f} credited to wallet.",
         "current_profit": float(investment.current_profit),
         "payout":         float(payout),
         "new_balance":    float(investor.balance),
@@ -334,18 +283,14 @@ def delete_user(request, pk):
         requester = Investor.objects.get(user=request.user)
     except Investor.DoesNotExist:
         return Response({"error": "Not found"}, status=404)
-
     if requester.role != "admin":
         return Response({"error": "Forbidden"}, status=403)
-
     try:
         user = User.objects.get(pk=pk)
     except User.DoesNotExist:
         return Response({"error": "User not found"}, status=404)
-
     if user == request.user:
         return Response({"error": "You cannot delete your own account."}, status=400)
-
     user.delete()
     return Response({"message": "User deleted successfully."})
 
@@ -358,13 +303,9 @@ def delete_user(request, pk):
 @permission_classes([IsAuthenticated])
 def dashboard_stats(request):
     total_users       = User.objects.count()
-    total_investments = (
-        Investment.objects.aggregate(total=models.Sum("amount"))["total"] or 0
-    )
-    total_withdrawals = (
-        Withdrawal.objects.aggregate(total=models.Sum("amount"))["total"] or 0
-    )
-    blocked_users = Investor.objects.filter(blocked=True).count()
+    total_investments = Investment.objects.aggregate(total=models.Sum("amount"))["total"] or 0
+    total_withdrawals = Withdrawal.objects.aggregate(total=models.Sum("amount"))["total"] or 0
+    blocked_users     = Investor.objects.filter(blocked=True).count()
 
     investment_by_category = list(
         Investment.objects
@@ -393,11 +334,7 @@ def dashboard_stats(request):
         "withdrawals":  float(total_withdrawals),
         "blocked_users": blocked_users,
         "investment_by_category": [
-            {
-                "category": c["category"],
-                "total":    float(c["total"]),
-                "count":    c["count"],
-            }
+            {"category": c["category"], "total": float(c["total"]), "count": c["count"]}
             for c in investment_by_category
         ],
         "monthly_investments": monthly_data,
@@ -417,9 +354,7 @@ def top_investors(request):
         .annotate(
             total_invested   = models.Sum("investment__amount"),
             total_profit     = models.Sum("investment__current_profit"),
-            active_plans     = models.Count(
-                "investment", filter=models.Q(investment__active=True)
-            ),
+            active_plans     = models.Count("investment", filter=models.Q(investment__active=True)),
             investment_count = models.Count("investment"),
         )
         .filter(total_invested__isnull=False)
@@ -440,7 +375,6 @@ def top_investors(request):
             "tier":             get_tier(count),
             "investment_count": count,
         })
-
     return Response(data)
 
 
@@ -591,9 +525,7 @@ class InvestmentViewSet(viewsets.ModelViewSet):
 
         if not skip_balance_check:
             with transaction.atomic():
-                locked_investor = Investor.objects.select_for_update().get(
-                    pk=investor.pk
-                )
+                locked_investor = Investor.objects.select_for_update().get(pk=investor.pk)
                 if locked_investor.balance < amount:
                     raise drf_serializers.ValidationError(
                         f"Insufficient wallet balance. "
@@ -617,40 +549,18 @@ class InvestmentViewSet(viewsets.ModelViewSet):
             plan_name = self.request.data.get("plan", "").strip()
             if plan_name not in PLAN_NAMES:
                 plan_name = plan_name or "Trial Plan"
-
             serializer.save(
-                investor  = investor,
-                plan      = plan_name,
-                category  = plan_name,
-                type      = "plan",
-                active    = False,
-                approved  = False,
-                status    = "Pending",
-                daily_roi = DAILY_ROI,
+                investor=investor, plan=plan_name, category=plan_name,
+                type="plan", active=False, approved=False, status="Pending", daily_roi=DAILY_ROI,
             )
-
         else:
             category = self.request.data.get("category", "").strip()
-
-            matched = next(
-                (c for c in STOCK_CATEGORIES if c == category),
-                None,
-            )
+            matched  = next((c for c in STOCK_CATEGORIES if c == category), None)
             if not matched:
-                matched = next(
-                    (c for c in STOCK_CATEGORIES if category and category in c),
-                    "Tesla (TSLA)",
-                )
-
+                matched = next((c for c in STOCK_CATEGORIES if category and category in c), "Tesla (TSLA)")
             serializer.save(
-                investor  = investor,
-                category  = matched,
-                plan      = "",
-                type      = "stock",
-                active    = False,
-                approved  = False,
-                status    = "Pending",
-                daily_roi = DAILY_ROI,
+                investor=investor, category=matched, plan="",
+                type="stock", active=False, approved=False, status="Pending", daily_roi=DAILY_ROI,
             )
 
     def partial_update(self, request, *args, **kwargs):
@@ -676,26 +586,16 @@ class InvestmentViewSet(viewsets.ModelViewSet):
 
         if new_status == "Declined" and instance.status == "Pending":
             with transaction.atomic():
-                investor = Investor.objects.select_for_update().get(
-                    pk=instance.investor.pk
-                )
+                investor = Investor.objects.select_for_update().get(pk=instance.investor.pk)
                 investor.balance += instance.amount
                 investor.save(update_fields=["balance"])
-                logger.info(
-                    f"[REFUND] {investor.name} | ${float(instance.amount):.2f} "
-                    f"refunded — investment #{instance.pk} declined"
-                )
+                logger.info(f"[REFUND] {investor.name} | ${float(instance.amount):.2f} refunded — investment #{instance.pk} declined")
 
         kwargs["partial"] = True
         serializer = self.get_serializer(instance, data=mutable, partial=True)
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
-
-        logger.info(
-            f"[INVESTMENT UPDATE] #{instance.pk} → status={mutable.get('status')} | "
-            f"approved={mutable.get('approved')} | active={mutable.get('active')}"
-        )
-
+        logger.info(f"[INVESTMENT UPDATE] #{instance.pk} → status={mutable.get('status')} | approved={mutable.get('approved')} | active={mutable.get('active')}")
         return Response(serializer.data)
 
     def update(self, request, *args, **kwargs):
@@ -713,7 +613,6 @@ class WithdrawalViewSet(viewsets.ModelViewSet):
             investor = Investor.objects.get(user=self.request.user)
         except Investor.DoesNotExist:
             return Withdrawal.objects.none()
-
         if investor.role == "admin":
             return Withdrawal.objects.all()
         return Withdrawal.objects.filter(investor=investor)
@@ -736,10 +635,7 @@ class WithdrawalViewSet(viewsets.ModelViewSet):
         if requester.role != "admin":
             lock_threshold = timezone.now() - timedelta(days=EXPIRY_DAYS)
             locked = Investment.objects.filter(
-                investor=investor,
-                active=True,
-                approved=True,
-                created_at__gt=lock_threshold,
+                investor=investor, active=True, approved=True, created_at__gt=lock_threshold,
             ).exists()
             if locked:
                 raise drf_serializers.ValidationError(
@@ -751,27 +647,15 @@ class WithdrawalViewSet(viewsets.ModelViewSet):
     def _maybe_deduct_balance(self, instance, new_status):
         if new_status == "Approved" and instance.status == "Pending":
             with transaction.atomic():
-                investor = Investor.objects.select_for_update().get(
-                    pk=instance.investor.pk
-                )
+                investor = Investor.objects.select_for_update().get(pk=instance.investor.pk)
                 if investor.balance < instance.amount:
                     return Response(
-                        {
-                            "error": (
-                                f"Insufficient balance. "
-                                f"Investor has ${float(investor.balance):.2f} but "
-                                f"withdrawal is ${float(instance.amount):.2f}."
-                            )
-                        },
+                        {"error": f"Insufficient balance. Investor has ${float(investor.balance):.2f} but withdrawal is ${float(instance.amount):.2f}."},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
                 investor.balance -= instance.amount
                 investor.save(update_fields=["balance"])
-
-                Investment.objects.filter(
-                    investor=investor, active=True
-                ).update(active=False)
-
+                Investment.objects.filter(investor=investor, active=True).update(active=False)
         return None
 
     def partial_update(self, request, *args, **kwargs):
@@ -791,10 +675,6 @@ class WithdrawalViewSet(viewsets.ModelViewSet):
         return super().update(request, *args, **kwargs)
 
 
-# ─────────────────────────────────────────────
-# DEPOSIT VIEWSET
-# ─────────────────────────────────────────────
-
 class DepositViewSet(viewsets.ModelViewSet):
     queryset           = Deposit.objects.all().order_by("-created_at")
     serializer_class   = DepositSerializer
@@ -805,7 +685,6 @@ class DepositViewSet(viewsets.ModelViewSet):
             investor = Investor.objects.get(user=self.request.user)
         except Investor.DoesNotExist:
             return Deposit.objects.none()
-
         if investor.role == "admin":
             return Deposit.objects.all().order_by("-created_at")
         return Deposit.objects.filter(investor=investor).order_by("-created_at")
@@ -819,9 +698,7 @@ class DepositViewSet(viewsets.ModelViewSet):
         payment_method = self.request.data.get("payment_method", "")
         valid_methods  = ["BTC", "TRX", "ETH", "USDT", "LTC", "XRP"]
         if payment_method not in valid_methods:
-            raise drf_serializers.ValidationError(
-                f"Invalid payment method. Choose from: {', '.join(valid_methods)}."
-            )
+            raise drf_serializers.ValidationError(f"Invalid payment method. Choose from: {', '.join(valid_methods)}.")
 
         try:
             amount = float(self.request.data.get("amount", 0))
@@ -837,35 +714,24 @@ class DepositViewSet(viewsets.ModelViewSet):
             requester = Investor.objects.get(user=request.user)
         except Investor.DoesNotExist:
             return Response({"error": "Not found."}, status=404)
-
         if requester.role != "admin":
             return Response({"error": "Forbidden."}, status=403)
 
         new_status = request.data.get("status", "").lower()
         if new_status not in ("approved", "declined"):
-            return Response(
-                {"error": "status must be 'approved' or 'declined'."},
-                status=400,
-            )
+            return Response({"error": "status must be 'approved' or 'declined'."}, status=400)
 
         instance = self.get_object()
-
         if instance.status != "pending":
-            return Response(
-                {"error": f"Deposit is already {instance.status}."},
-                status=400,
-            )
+            return Response({"error": f"Deposit is already {instance.status}."}, status=400)
 
         if new_status == "approved":
             with transaction.atomic():
-                investor = Investor.objects.select_for_update().get(
-                    pk=instance.investor.pk
-                )
+                investor = Investor.objects.select_for_update().get(pk=instance.investor.pk)
                 investor.balance += instance.amount
                 investor.save(update_fields=["balance"])
                 instance.status = "approved"
                 instance.save(update_fields=["status"])
-
             logger.info(
                 f"[DEPOSIT APPROVED] {instance.investor.name} | "
                 f"{instance.payment_method} | ${float(instance.amount):.2f} | "
@@ -874,10 +740,7 @@ class DepositViewSet(viewsets.ModelViewSet):
         else:
             instance.status = "declined"
             instance.save(update_fields=["status"])
-            logger.info(
-                f"[DEPOSIT DECLINED] {instance.investor.name} | "
-                f"{instance.payment_method} | ${float(instance.amount):.2f}"
-            )
+            logger.info(f"[DEPOSIT DECLINED] {instance.investor.name} | {instance.payment_method} | ${float(instance.amount):.2f}")
 
         return Response(DepositSerializer(instance).data)
 
@@ -891,12 +754,6 @@ class DepositViewSet(viewsets.ModelViewSet):
 # ─────────────────────────────────────────────
 
 class ReferralViewSet(viewsets.ModelViewSet):
-    """
-    GET    referrals/           → admin: all referrals; user: their own referrals made
-    GET    referrals/my-stats/  → current user's referral stats + referral link
-    PATCH  referrals/<id>/      → admin approve / decline
-    DELETE referrals/<id>/      → admin delete record
-    """
     serializer_class   = ReferralSerializer
     permission_classes = [IsAuthenticated]
 
@@ -905,14 +762,9 @@ class ReferralViewSet(viewsets.ModelViewSet):
             investor = Investor.objects.get(user=self.request.user)
         except Investor.DoesNotExist:
             return Referral.objects.none()
-
         if investor.role == "admin":
             return Referral.objects.all().order_by("-created_at")
-
-        # Regular users see only referrals they created
         return Referral.objects.filter(referrer=investor).order_by("-created_at")
-
-    # ── my-stats ──────────────────────────────────────────────────────────────
 
     @action(detail=False, methods=["get"], url_path="my-stats", url_name="my-stats")
     def my_stats(self, request):
@@ -921,18 +773,11 @@ class ReferralViewSet(viewsets.ModelViewSet):
         except Investor.DoesNotExist:
             return Response({"error": "Profile not found."}, status=404)
 
-        referrals = Referral.objects.filter(referrer=investor)
-
+        referrals        = Referral.objects.filter(referrer=investor)
         total_referred   = referrals.count()
         active_contracts = referrals.filter(status="active").count()
-
-        total_earnings = (
-            referrals.filter(status="active")
-            .aggregate(total=Sum("commission"))["total"]
-            or 0
-        )
-
-        referral_link = f"{FRONTEND_URL}/register?ref={investor.referral_code}"
+        total_earnings   = referrals.filter(status="active").aggregate(total=Sum("commission"))["total"] or 0
+        referral_link    = f"{FRONTEND_URL}/register?ref={investor.referral_code}"
 
         return Response({
             "total_referred":   total_referred,
@@ -942,14 +787,11 @@ class ReferralViewSet(viewsets.ModelViewSet):
             "referral_link":    referral_link,
         })
 
-    # ── Approve / Decline via PATCH ───────────────────────────────────────────
-
     def partial_update(self, request, *args, **kwargs):
         try:
             requester = Investor.objects.get(user=request.user)
         except Investor.DoesNotExist:
             return Response({"error": "Not found."}, status=404)
-
         if requester.role != "admin":
             return Response({"error": "Forbidden."}, status=403)
 
@@ -964,30 +806,19 @@ class ReferralViewSet(viewsets.ModelViewSet):
                 new_status = "inactive"
 
         if new_status not in ("active", "inactive", "pending", "expired"):
-            return Response(
-                {"error": "status must be one of: active, inactive, pending, expired."},
-                status=400,
-            )
+            return Response({"error": "status must be one of: active, inactive, pending, expired."}, status=400)
 
         with transaction.atomic():
             if new_status == "active" and instance.status != "active":
                 referrer = Investor.objects.select_for_update().get(pk=instance.referrer.pk)
                 referrer.balance += instance.commission
                 referrer.save(update_fields=["balance"])
-                logger.info(
-                    f"[REFERRAL APPROVED] {referrer.name} | "
-                    f"Commission: ${float(instance.commission):.2f} | "
-                    f"New balance: ${float(referrer.balance):.2f}"
-                )
-
+                logger.info(f"[REFERRAL APPROVED] {referrer.name} | Commission: ${float(instance.commission):.2f} | New balance: ${float(referrer.balance):.2f}")
             elif new_status == "inactive" and instance.status == "active":
                 referrer = Investor.objects.select_for_update().get(pk=instance.referrer.pk)
                 referrer.balance = max(referrer.balance - instance.commission, 0)
                 referrer.save(update_fields=["balance"])
-                logger.info(
-                    f"[REFERRAL DECLINED] Commission reversed for {referrer.name} | "
-                    f"-${float(instance.commission):.2f}"
-                )
+                logger.info(f"[REFERRAL DECLINED] Commission reversed for {referrer.name} | -${float(instance.commission):.2f}")
 
             instance.status   = new_status
             instance.approved = (new_status == "active")
@@ -999,17 +830,13 @@ class ReferralViewSet(viewsets.ModelViewSet):
         kwargs["partial"] = True
         return self.partial_update(request, *args, **kwargs)
 
-    # ── Delete ────────────────────────────────────────────────────────────────
-
     def destroy(self, request, *args, **kwargs):
         try:
             requester = Investor.objects.get(user=request.user)
         except Investor.DoesNotExist:
             return Response({"error": "Not found."}, status=404)
-
         if requester.role != "admin":
             return Response({"error": "Forbidden."}, status=403)
-
         return super().destroy(request, *args, **kwargs)
 
 
@@ -1018,12 +845,6 @@ class ReferralViewSet(viewsets.ModelViewSet):
 # ─────────────────────────────────────────────
 
 class CopyTradingSubscriptionViewSet(viewsets.ModelViewSet):
-    """
-    GET    copy-trading-subscriptions/       → admin: all; user: own
-    POST   copy-trading-subscriptions/       → user subscribes to a plan
-    PATCH  copy-trading-subscriptions/<id>/  → admin approve / decline
-    DELETE copy-trading-subscriptions/<id>/  → admin delete
-    """
     serializer_class   = CopyTradingSubscriptionSerializer
     permission_classes = [IsAuthenticated]
 
@@ -1032,13 +853,9 @@ class CopyTradingSubscriptionViewSet(viewsets.ModelViewSet):
             investor = Investor.objects.get(user=self.request.user)
         except Investor.DoesNotExist:
             return CopyTradingSubscription.objects.none()
-
         if investor.role == "admin":
             return CopyTradingSubscription.objects.all().order_by("-created_at")
-
-        return CopyTradingSubscription.objects.filter(
-            investor=investor
-        ).order_by("-created_at")
+        return CopyTradingSubscription.objects.filter(investor=investor).order_by("-created_at")
 
     def perform_create(self, serializer):
         try:
@@ -1047,56 +864,33 @@ class CopyTradingSubscriptionViewSet(viewsets.ModelViewSet):
             raise drf_serializers.ValidationError("Investor profile not found.")
 
         plan = self.request.data.get("plan", "").strip()
-        valid_plans = list(COPY_TRADING_PLAN_PRICES.keys())
-        if plan not in valid_plans:
-            raise drf_serializers.ValidationError(
-                f"Invalid plan. Choose from: {', '.join(valid_plans)}."
-            )
+        if plan not in list(COPY_TRADING_PLAN_PRICES.keys()):
+            raise drf_serializers.ValidationError(f"Invalid plan. Choose from: {', '.join(COPY_TRADING_PLAN_PRICES.keys())}.")
 
-        # Block duplicate active subscriptions for regular users
         if investor.role != "admin":
-            existing = CopyTradingSubscription.objects.filter(
-                investor=investor,
-                active=True,
-            ).exists()
-            if existing:
-                raise drf_serializers.ValidationError(
-                    "You already have an active copy trading subscription."
-                )
+            if CopyTradingSubscription.objects.filter(investor=investor, active=True).exists():
+                raise drf_serializers.ValidationError("You already have an active copy trading subscription.")
 
-        copied_trader = self.request.data.get("copied_trader", "").strip()
-
+        copied_trader  = self.request.data.get("copied_trader", "").strip()
         plan_fee       = COPY_TRADING_PLAN_PRICES.get(plan, 0)
         deposit_amount = COPY_TRADING_PLAN_DEPOSITS.get(plan, 0)
 
         serializer.save(
-            investor       = investor,
-            plan           = plan,
-            plan_fee       = plan_fee,
-            deposit_amount = deposit_amount,
-            copied_trader  = copied_trader,
-            status         = "Pending",
-            approved       = False,
-            active         = False,
+            investor=investor, plan=plan, plan_fee=plan_fee,
+            deposit_amount=deposit_amount, copied_trader=copied_trader,
+            status="Pending", approved=False, active=False,
         )
-
-        logger.info(
-            f"[COPY TRADING] {investor.name} subscribed to {plan} plan "
-            f"(fee=${plan_fee}, deposit=${deposit_amount})"
-        )
+        logger.info(f"[COPY TRADING] {investor.name} subscribed to {plan} plan (fee=${plan_fee}, deposit=${deposit_amount})")
 
     def partial_update(self, request, *args, **kwargs):
         try:
             requester = Investor.objects.get(user=request.user)
         except Investor.DoesNotExist:
             return Response({"error": "Not found."}, status=404)
-
         if requester.role != "admin":
             return Response({"error": "Forbidden."}, status=403)
 
-        instance = self.get_object()
-
-        # Resolve new status from either explicit status field or approved bool
+        instance   = self.get_object()
         new_status = request.data.get("status", "").strip()
         approved   = request.data.get("approved")
 
@@ -1107,21 +901,13 @@ class CopyTradingSubscriptionViewSet(viewsets.ModelViewSet):
                 new_status = "Declined"
 
         if new_status not in ("Approved", "Declined", "Pending"):
-            return Response(
-                {"error": "status must be one of: Approved, Declined, Pending."},
-                status=400,
-            )
+            return Response({"error": "status must be one of: Approved, Declined, Pending."}, status=400)
 
         instance.status   = new_status
         instance.approved = (new_status == "Approved")
         instance.active   = (new_status == "Approved")
         instance.save(update_fields=["status", "approved", "active"])
-
-        logger.info(
-            f"[COPY TRADING UPDATE] #{instance.pk} → {new_status} "
-            f"for {instance.investor.name}"
-        )
-
+        logger.info(f"[COPY TRADING UPDATE] #{instance.pk} → {new_status} for {instance.investor.name}")
         return Response(CopyTradingSubscriptionSerializer(instance).data)
 
     def update(self, request, *args, **kwargs):
@@ -1133,13 +919,105 @@ class CopyTradingSubscriptionViewSet(viewsets.ModelViewSet):
             requester = Investor.objects.get(user=request.user)
         except Investor.DoesNotExist:
             return Response({"error": "Not found."}, status=404)
+        if requester.role != "admin":
+            return Response({"error": "Forbidden."}, status=403)
+        instance = self.get_object()
+        logger.info(f"[COPY TRADING DELETED] #{instance.pk} — {instance.investor.name} / {instance.plan}")
+        return super().destroy(request, *args, **kwargs)
 
+
+# ─────────────────────────────────────────────
+# BOT SUBSCRIPTION VIEWSET
+# ─────────────────────────────────────────────
+
+class BotSubscriptionViewSet(viewsets.ModelViewSet):
+    """
+    GET    bot-subscriptions/       → admin: all; user: own
+    POST   bot-subscriptions/       → user submits a plan request
+    PATCH  bot-subscriptions/<id>/  → admin approve / decline
+    DELETE bot-subscriptions/<id>/  → admin delete
+    """
+    serializer_class   = BotSubscriptionSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        try:
+            investor = Investor.objects.get(user=self.request.user)
+        except Investor.DoesNotExist:
+            return BotSubscription.objects.none()
+        if investor.role == "admin":
+            return BotSubscription.objects.all().order_by("-created_at")
+        return BotSubscription.objects.filter(investor=investor).order_by("-created_at")
+
+    def perform_create(self, serializer):
+        try:
+            investor = Investor.objects.get(user=self.request.user)
+        except Investor.DoesNotExist:
+            raise drf_serializers.ValidationError("Investor profile not found.")
+
+        plan           = self.request.data.get("plan", "").strip()
+        billing_period = self.request.data.get("billing_period", "monthly").strip()
+        valid_plans    = ["Starter", "Pro", "Institutional"]
+        valid_periods  = ["weekly", "monthly", "yearly"]
+
+        if plan not in valid_plans:
+            raise drf_serializers.ValidationError(f"Invalid plan. Choose from: {', '.join(valid_plans)}.")
+        if billing_period not in valid_periods:
+            raise drf_serializers.ValidationError(f"Invalid billing period. Choose from: {', '.join(valid_periods)}.")
+
+        if investor.role != "admin":
+            if BotSubscription.objects.filter(investor=investor, active=True).exists():
+                raise drf_serializers.ValidationError("You already have an active bot subscription.")
+
+        plan_fee       = BOT_PLAN_PRICES.get(billing_period, {}).get(plan, 0)
+        deposit_amount = BOT_PLAN_DEPOSITS.get(plan, 0)
+
+        serializer.save(
+            investor=investor, plan=plan, billing_period=billing_period,
+            plan_fee=plan_fee, deposit_amount=deposit_amount,
+            status="Pending", approved=False, active=False,
+        )
+        logger.info(f"[BOT SUBSCRIPTION] {investor.name} requested {plan} / {billing_period} (fee=${plan_fee}, deposit=${deposit_amount})")
+
+    def partial_update(self, request, *args, **kwargs):
+        try:
+            requester = Investor.objects.get(user=request.user)
+        except Investor.DoesNotExist:
+            return Response({"error": "Not found."}, status=404)
         if requester.role != "admin":
             return Response({"error": "Forbidden."}, status=403)
 
+        instance   = self.get_object()
+        new_status = request.data.get("status", "").strip()
+        approved   = request.data.get("approved")
+
+        if not new_status:
+            if approved is True or approved == "true":
+                new_status = "Approved"
+            elif approved is False or approved == "false":
+                new_status = "Declined"
+
+        if new_status not in ("Approved", "Declined", "Pending"):
+            return Response({"error": "status must be one of: Approved, Declined, Pending."}, status=400)
+
+        instance.status   = new_status
+        instance.approved = (new_status == "Approved")
+        instance.active   = (new_status == "Approved")
+        instance.save(update_fields=["status", "approved", "active"])
+        logger.info(f"[BOT SUBSCRIPTION UPDATE] #{instance.pk} → {new_status} for {instance.investor.name}")
+        return Response(BotSubscriptionSerializer(instance).data)
+
+    def update(self, request, *args, **kwargs):
+        kwargs["partial"] = True
+        return self.partial_update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        try:
+            requester = Investor.objects.get(user=request.user)
+        except Investor.DoesNotExist:
+            return Response({"error": "Not found."}, status=404)
+        if requester.role != "admin":
+            return Response({"error": "Forbidden."}, status=403)
         instance = self.get_object()
-        logger.info(
-            f"[COPY TRADING DELETED] #{instance.pk} — "
-            f"{instance.investor.name} / {instance.plan}"
-        )
+        logger.info(f"[BOT SUBSCRIPTION DELETED] #{instance.pk} — {instance.investor.name} / {instance.plan}")
         return super().destroy(request, *args, **kwargs)
