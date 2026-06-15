@@ -132,9 +132,13 @@ class CopyTradingSubscriptionSerializer(serializers.ModelSerializer):
             "id", "investor", "user", "user_name", "user_email",
             "plan", "status", "approved", "active",
             "plan_fee", "deposit_amount", "copied_trader",
+            "duration_days", "copy_started_at", "copy_ends_at",
             "created_at", "updated_at",
         ]
-        read_only_fields = ["investor", "plan_fee", "deposit_amount", "created_at", "updated_at"]
+        read_only_fields = [
+            "investor", "plan_fee", "deposit_amount", "duration_days",
+            "copy_started_at", "copy_ends_at", "created_at", "updated_at",
+        ]
 
     def get_user_name(self, obj):
         return obj.investor.name or obj.investor.email or "Unknown"

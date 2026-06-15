@@ -1,5 +1,6 @@
 from django.db import models
 from django.contrib.auth.models import User
+from django.utils import timezone
 
 
 NETWORK_MAP = {
@@ -164,6 +165,7 @@ COPY_TRADING_STATUS_CHOICES = (
     ("Pending",  "Pending"),
     ("Approved", "Approved"),
     ("Declined", "Declined"),
+    ("Expired",  "Expired"),
 )
 COPY_TRADING_PLAN_PRICES = {
     "Starter":       49,
@@ -175,6 +177,18 @@ COPY_TRADING_PLAN_DEPOSITS = {
     "Pro":           2000,
     "Institutional": 10000,
 }
+
+# Mirrors the `duration` shown on each trader card in the frontend (traders[].duration).
+# Used to compute when an approved copy-trading subscription auto-expires.
+COPY_TRADING_TRADER_DURATIONS = {
+    "Alex Mercer":   14,
+    "Sofia Chen":    30,
+    "Raj Patel":     7,
+    "Elena Kovacs":  30,
+    "Marcus Webb":   14,
+    "Nadia Osei":    21,
+}
+COPY_TRADING_DEFAULT_DURATION_DAYS = 14
 
 
 class CopyTradingSubscription(models.Model):
@@ -188,6 +202,11 @@ class CopyTradingSubscription(models.Model):
     deposit_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     copied_trader  = models.CharField(max_length=100, blank=True, default="")
 
+    # Duration / expiry tracking
+    duration_days  = models.PositiveIntegerField(default=COPY_TRADING_DEFAULT_DURATION_DAYS)
+    copy_started_at = models.DateTimeField(null=True, blank=True)
+    copy_ends_at    = models.DateTimeField(null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -196,6 +215,29 @@ class CopyTradingSubscription(models.Model):
 
     def __str__(self):
         return f"{self.investor.name} — {self.plan} [{self.status}]"
+
+    def start_copying(self):
+        """Call when admin approves the subscription. Sets the run window."""
+        now = timezone.now()
+        self.copy_started_at = now
+        self.copy_ends_at    = now + timezone.timedelta(days=self.duration_days)
+        self.status   = "Approved"
+        self.approved = True
+        self.active   = True
+
+    def stop_copying(self, status="Declined"):
+        """Call to manually cancel or to mark as expired."""
+        self.status   = status
+        self.approved = False
+        self.active   = False
+
+    @property
+    def is_expired(self):
+        return bool(
+            self.active
+            and self.copy_ends_at is not None
+            and timezone.now() >= self.copy_ends_at
+        )
 
 
 # ─────────────────────────────────────────────

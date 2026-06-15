@@ -19,6 +19,7 @@ from rest_framework import serializers as drf_serializers
 from .models import (
     Investor, Investment, Withdrawal, Deposit, Referral,
     CopyTradingSubscription, COPY_TRADING_PLAN_PRICES, COPY_TRADING_PLAN_DEPOSITS,
+    COPY_TRADING_TRADER_DURATIONS, COPY_TRADING_DEFAULT_DURATION_DAYS,
     BotSubscription, BOT_PLAN_PRICES, BOT_PLAN_DEPOSITS,
 )
 from .serializers import (
@@ -197,7 +198,45 @@ def trigger_roi(request):
         return Response({"error": "Forbidden"}, status=403)
     from .tasks import apply_daily_roi
     result = apply_daily_roi()
-    return Response({"result": result})
+
+    # Also sweep for copy-trading subscriptions whose duration has elapsed.
+    expired = expire_copy_trading_subscriptions()
+
+    return Response({"result": result, "copy_trading_expired": expired})
+
+
+# ─────────────────────────────────────────────
+# COPY TRADING — AUTO-EXPIRY HELPER
+# ─────────────────────────────────────────────
+
+def expire_copy_trading_subscriptions():
+    """
+    Finds all active/approved copy-trading subscriptions whose `copy_ends_at`
+    has passed, and stops them (status -> Expired, active/approved -> False).
+
+    Returns the number of subscriptions that were expired.
+    Safe to call repeatedly (idempotent) — e.g. from a daily cron via
+    trigger_roi, or from a management command.
+    """
+    now = timezone.now()
+    qs = CopyTradingSubscription.objects.filter(
+        active=True,
+        approved=True,
+        copy_ends_at__isnull=False,
+        copy_ends_at__lte=now,
+    )
+
+    count = 0
+    for sub in qs:
+        sub.stop_copying(status="Expired")
+        sub.save(update_fields=["status", "approved", "active", "updated_at"])
+        logger.info(
+            f"[COPY TRADING EXPIRED] #{sub.pk} — {sub.investor.name} "
+            f"({sub.copied_trader}) ran for {sub.duration_days} days"
+        )
+        count += 1
+
+    return count
 
 
 # ─────────────────────────────────────────────
@@ -853,6 +892,11 @@ class CopyTradingSubscriptionViewSet(viewsets.ModelViewSet):
             investor = Investor.objects.get(user=self.request.user)
         except Investor.DoesNotExist:
             return CopyTradingSubscription.objects.none()
+
+        # Sweep expired subscriptions every time the list is loaded, so the
+        # UI always reflects reality even if the cron hasn't run yet.
+        expire_copy_trading_subscriptions()
+
         if investor.role == "admin":
             return CopyTradingSubscription.objects.all().order_by("-created_at")
         return CopyTradingSubscription.objects.filter(investor=investor).order_by("-created_at")
@@ -874,41 +918,85 @@ class CopyTradingSubscriptionViewSet(viewsets.ModelViewSet):
         copied_trader  = self.request.data.get("copied_trader", "").strip()
         plan_fee       = COPY_TRADING_PLAN_PRICES.get(plan, 0)
         deposit_amount = COPY_TRADING_PLAN_DEPOSITS.get(plan, 0)
+        duration_days  = COPY_TRADING_TRADER_DURATIONS.get(copied_trader, COPY_TRADING_DEFAULT_DURATION_DAYS)
 
         serializer.save(
             investor=investor, plan=plan, plan_fee=plan_fee,
             deposit_amount=deposit_amount, copied_trader=copied_trader,
+            duration_days=duration_days,
             status="Pending", approved=False, active=False,
         )
-        logger.info(f"[COPY TRADING] {investor.name} subscribed to {plan} plan (fee={plan_fee}, deposit={deposit_amount})")
+        logger.info(
+            f"[COPY TRADING] {investor.name} subscribed to {plan} plan "
+            f"(fee={plan_fee}, deposit={deposit_amount}, duration={duration_days}d, trader={copied_trader})"
+        )
 
     def partial_update(self, request, *args, **kwargs):
         try:
             requester = Investor.objects.get(user=request.user)
         except Investor.DoesNotExist:
             return Response({"error": "Not found."}, status=404)
-        if requester.role != "admin":
+
+        instance = self.get_object()
+
+        # ── Admin path: approve / decline / reset to pending ────────────────
+        if requester.role == "admin":
+            new_status = request.data.get("status", "").strip()
+            approved   = request.data.get("approved")
+
+            if not new_status:
+                if approved is True or approved == "true" or approved is True:
+                    new_status = "Approved"
+                elif approved is False or approved == "false" or approved is False:
+                    new_status = "Declined"
+
+            if new_status not in ("Approved", "Declined", "Pending"):
+                return Response({"error": "status must be one of: Approved, Declined, Pending."}, status=400)
+
+            if new_status == "Approved":
+                instance.start_copying()
+                instance.save(update_fields=[
+                    "status", "approved", "active",
+                    "copy_started_at", "copy_ends_at", "updated_at",
+                ])
+                logger.info(
+                    f"[COPY TRADING APPROVED] #{instance.pk} for {instance.investor.name} "
+                    f"— copying {instance.copied_trader} for {instance.duration_days} days "
+                    f"(ends {instance.copy_ends_at})"
+                )
+            elif new_status == "Declined":
+                instance.stop_copying(status="Declined")
+                instance.save(update_fields=["status", "approved", "active", "updated_at"])
+                logger.info(f"[COPY TRADING DECLINED] #{instance.pk} for {instance.investor.name}")
+            else:  # Pending — admin manually resets
+                instance.status   = "Pending"
+                instance.approved = False
+                instance.active   = False
+                instance.copy_started_at = None
+                instance.copy_ends_at    = None
+                instance.save(update_fields=[
+                    "status", "approved", "active",
+                    "copy_started_at", "copy_ends_at", "updated_at",
+                ])
+                logger.info(f"[COPY TRADING RESET] #{instance.pk} for {instance.investor.name}")
+
+            return Response(CopyTradingSubscriptionSerializer(instance).data)
+
+        # ── User path: a user may only stop their OWN active subscription ──
+        if instance.investor != requester:
             return Response({"error": "Forbidden."}, status=403)
 
-        instance   = self.get_object()
         new_status = request.data.get("status", "").strip()
-        approved   = request.data.get("approved")
+        if new_status == "Declined" and (instance.active or instance.status == "Pending"):
+            instance.stop_copying(status="Declined")
+            instance.save(update_fields=["status", "approved", "active", "updated_at"])
+            logger.info(
+                f"[COPY TRADING STOPPED BY USER] #{instance.pk} — "
+                f"{requester.name} stopped copying {instance.copied_trader}"
+            )
+            return Response(CopyTradingSubscriptionSerializer(instance).data)
 
-        if not new_status:
-            if approved is True or approved == "true" or approved == True:
-                new_status = "Approved"
-            elif approved is False or approved == "false" or approved == False:
-                new_status = "Declined"
-
-        if new_status not in ("Approved", "Declined", "Pending"):
-            return Response({"error": "status must be one of: Approved, Declined, Pending."}, status=400)
-
-        instance.status   = new_status
-        instance.approved = (new_status == "Approved")
-        instance.active   = (new_status == "Approved")
-        instance.save(update_fields=["status", "approved", "active"])
-        logger.info(f"[COPY TRADING UPDATE] #{instance.pk} → {new_status} for {instance.investor.name}")
-        return Response(CopyTradingSubscriptionSerializer(instance).data)
+        return Response({"error": "Forbidden."}, status=403)
 
     def update(self, request, *args, **kwargs):
         kwargs["partial"] = True
