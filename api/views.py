@@ -228,11 +228,19 @@ def expire_copy_trading_subscriptions():
 
     count = 0
     for sub in qs:
-        sub.stop_copying(status="Expired")
-        sub.save(update_fields=["status", "approved", "active", "updated_at"])
+        with transaction.atomic():
+            investor = Investor.objects.select_for_update().get(pk=sub.investor.pk)
+            investor.balance += sub.deposit_amount
+            investor.save(update_fields=["balance"])
+
+            sub.stop_copying(status="Expired")
+            sub.save(update_fields=["status", "approved", "active", "updated_at"])
+
         logger.info(
             f"[COPY TRADING EXPIRED] #{sub.pk} — {sub.investor.name} "
-            f"({sub.copied_trader}) ran for {sub.duration_days} days"
+            f"({sub.copied_trader}) ran for {sub.duration_days} days | "
+            f"${float(sub.deposit_amount):.2f} refunded | "
+            f"New balance: ${float(investor.balance):.2f}"
         )
         count += 1
 
@@ -920,6 +928,19 @@ class CopyTradingSubscriptionViewSet(viewsets.ModelViewSet):
         deposit_amount = COPY_TRADING_PLAN_DEPOSITS.get(plan, 0)
         duration_days  = COPY_TRADING_TRADER_DURATIONS.get(copied_trader, COPY_TRADING_DEFAULT_DURATION_DAYS)
 
+        # Ensure the user has enough wallet balance to cover the plan's
+        # required deposit before allowing the subscription request.
+        if investor.role != "admin":
+            from decimal import Decimal
+            deposit_decimal = Decimal(str(deposit_amount))
+            if investor.balance < deposit_decimal:
+                raise drf_serializers.ValidationError(
+                    f"Insufficient wallet balance for the {plan} plan. "
+                    f"Your balance is ${float(investor.balance):,.2f} but "
+                    f"this plan requires a minimum deposit of ${float(deposit_decimal):,.2f}. "
+                    f"Please fund your account first."
+                )
+
         serializer.save(
             investor=investor, plan=plan, plan_fee=plan_fee,
             deposit_amount=deposit_amount, copied_trader=copied_trader,
@@ -954,19 +975,48 @@ class CopyTradingSubscriptionViewSet(viewsets.ModelViewSet):
                 return Response({"error": "status must be one of: Approved, Declined, Pending."}, status=400)
 
             if new_status == "Approved":
-                instance.start_copying()
-                instance.save(update_fields=[
-                    "status", "approved", "active",
-                    "copy_started_at", "copy_ends_at", "updated_at",
-                ])
+                with transaction.atomic():
+                    investor = Investor.objects.select_for_update().get(pk=instance.investor.pk)
+                    if investor.balance < instance.deposit_amount:
+                        return Response(
+                            {"error": (
+                                f"Cannot approve — {instance.investor.name} has "
+                                f"${float(investor.balance):,.2f} but the {instance.plan} plan "
+                                f"requires ${float(instance.deposit_amount):,.2f}."
+                            )},
+                            status=400,
+                        )
+                    investor.balance -= instance.deposit_amount
+                    investor.save(update_fields=["balance"])
+
+                    instance.start_copying()
+                    instance.save(update_fields=[
+                        "status", "approved", "active",
+                        "copy_started_at", "copy_ends_at", "updated_at",
+                    ])
                 logger.info(
                     f"[COPY TRADING APPROVED] #{instance.pk} for {instance.investor.name} "
                     f"— copying {instance.copied_trader} for {instance.duration_days} days "
-                    f"(ends {instance.copy_ends_at})"
+                    f"(ends {instance.copy_ends_at}) | "
+                    f"${float(instance.deposit_amount):.2f} locked, "
+                    f"new balance: ${float(investor.balance):.2f}"
                 )
             elif new_status == "Declined":
-                instance.stop_copying(status="Declined")
-                instance.save(update_fields=["status", "approved", "active", "updated_at"])
+                with transaction.atomic():
+                    # Refund the locked deposit only if it had actually been
+                    # deducted (i.e. the subscription was previously Approved).
+                    if instance.status == "Approved":
+                        investor = Investor.objects.select_for_update().get(pk=instance.investor.pk)
+                        investor.balance += instance.deposit_amount
+                        investor.save(update_fields=["balance"])
+                        logger.info(
+                            f"[COPY TRADING REFUND] {instance.investor.name} | "
+                            f"${float(instance.deposit_amount):.2f} refunded | "
+                            f"New balance: ${float(investor.balance):.2f}"
+                        )
+
+                    instance.stop_copying(status="Declined")
+                    instance.save(update_fields=["status", "approved", "active", "updated_at"])
                 logger.info(f"[COPY TRADING DECLINED] #{instance.pk} for {instance.investor.name}")
             else:  # Pending — admin manually resets
                 instance.status   = "Pending"
@@ -988,8 +1038,19 @@ class CopyTradingSubscriptionViewSet(viewsets.ModelViewSet):
 
         new_status = request.data.get("status", "").strip()
         if new_status == "Declined" and (instance.active or instance.status == "Pending"):
-            instance.stop_copying(status="Declined")
-            instance.save(update_fields=["status", "approved", "active", "updated_at"])
+            with transaction.atomic():
+                if instance.status == "Approved":
+                    investor = Investor.objects.select_for_update().get(pk=requester.pk)
+                    investor.balance += instance.deposit_amount
+                    investor.save(update_fields=["balance"])
+                    logger.info(
+                        f"[COPY TRADING REFUND] {requester.name} | "
+                        f"${float(instance.deposit_amount):.2f} refunded | "
+                        f"New balance: ${float(investor.balance):.2f}"
+                    )
+
+                instance.stop_copying(status="Declined")
+                instance.save(update_fields=["status", "approved", "active", "updated_at"])
             logger.info(
                 f"[COPY TRADING STOPPED BY USER] #{instance.pk} — "
                 f"{requester.name} stopped copying {instance.copied_trader}"
