@@ -33,35 +33,39 @@ router.register("referrals",                  ReferralViewSet,                ba
 router.register("copy-trading-subscriptions", CopyTradingSubscriptionViewSet, basename="copy-trading-subscription")
 router.register("bot-subscriptions",          BotSubscriptionViewSet,         basename="bot-subscription")
 
-referral_my_stats = ReferralViewSet.as_view({"get": "my_stats"})
+# Custom actions that must be declared BEFORE router.urls to avoid
+# being matched as detail routes (e.g. pk="my-active" or pk="my-stats")
+referral_my_stats      = ReferralViewSet.as_view({"get": "my_stats"})
+bot_my_active          = BotSubscriptionViewSet.as_view({"get": "my_active"})
 
 urlpatterns = [
-    # Referral stats — must come before router include
-    path("referrals/my-stats/", referral_my_stats, name="referral-my-stats"),
+    # ── Custom actions (must come before router include) ──────────────────
+    path("referrals/my-stats/",           referral_my_stats, name="referral-my-stats"),
+    path("bot-subscriptions/my-active/",  bot_my_active,     name="bot-subscription-my-active"),
 
-    # Router
+    # ── Router ────────────────────────────────────────────────────────────
     path("", include(router.urls)),
 
-    # Auth
+    # ── Auth ──────────────────────────────────────────────────────────────
     path("register/",               register),
     path("change-password/",        change_password),
     path("forgot-password/",        forgot_password),
     path("reset-password/confirm/", reset_password_confirm),
 
-    # Dashboard / profile
+    # ── Dashboard / profile ───────────────────────────────────────────────
     path("user-dashboard/",  user_dashboard),
     path("profile/",         profile_view),
     path("dashboard-stats/", dashboard_stats),
 
-    # Users
+    # ── Users ─────────────────────────────────────────────────────────────
     path("users/",                 all_users),
     path("users/<int:pk>/delete/", delete_user),
 
-    # Investments
+    # ── Investments ───────────────────────────────────────────────────────
     path("top-investors/",                   top_investors),
     path("investments/<int:pk>/approve/",    approve_investment),
     path("investments/<int:pk>/add_profit/", add_profit),
 
-    # Misc
+    # ── Misc ──────────────────────────────────────────────────────────────
     path("trigger-roi/", trigger_roi),
 ]
