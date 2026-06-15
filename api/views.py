@@ -927,16 +927,17 @@ class CopyTradingSubscriptionViewSet(viewsets.ModelViewSet):
 
 
 # ─────────────────────────────────────────────
-# BOT SUBSCRIPTION VIEWSET  ← KEY FIXES HERE
+# BOT SUBSCRIPTION VIEWSET
 # ─────────────────────────────────────────────
 
 class BotSubscriptionViewSet(viewsets.ModelViewSet):
     """
-    GET    bot-subscriptions/       → admin: all records; user: own records (all statuses)
-    POST   bot-subscriptions/       → user submits a new plan request
-    PATCH  bot-subscriptions/<id>/  → admin: approve / decline / reopen
-                                      user: allowed to cancel their OWN pending request
-    DELETE bot-subscriptions/<id>/  → admin only
+    GET    bot-subscriptions/              → admin: all records; user: own records (all statuses)
+    GET    bot-subscriptions/my-active/    → returns the user's current approved subscription (or 404)
+    POST   bot-subscriptions/             → user submits a new plan request
+    PATCH  bot-subscriptions/<id>/        → admin: approve / decline / reopen
+                                            user: allowed to cancel their OWN pending request
+    DELETE bot-subscriptions/<id>/        → admin only
     """
     serializer_class   = BotSubscriptionSerializer
     permission_classes = [IsAuthenticated]
@@ -950,6 +951,56 @@ class BotSubscriptionViewSet(viewsets.ModelViewSet):
             return BotSubscription.objects.all().order_by("-created_at")
         # Return ALL of the user's own records so the frontend can determine status
         return BotSubscription.objects.filter(investor=investor).order_by("-created_at")
+
+    # ── NEW: dedicated endpoint for the user's active subscription ──────────
+    @action(detail=False, methods=["get"], url_path="my-active", url_name="my-active")
+    def my_active(self, request):
+        """
+        Returns the authenticated user's most recent APPROVED bot subscription.
+        Returns 404 if the user has no active subscription.
+        This endpoint is used by the frontend on page load to restore subscription
+        state after a refresh without relying on localStorage.
+        """
+        try:
+            investor = Investor.objects.get(user=request.user)
+        except Investor.DoesNotExist:
+            return Response({"error": "Investor profile not found."}, status=404)
+
+        # Admin users have full access; return a synthetic response
+        if investor.role == "admin":
+            return Response({
+                "is_admin":        True,
+                "has_active_plan": True,
+                "plan":            "Institutional",
+                "billing_period":  None,
+                "subscription":    None,
+                "pending":         None,
+            })
+
+        # Find the most recently approved subscription
+        active_sub = (
+            BotSubscription.objects
+            .filter(investor=investor, approved=True, active=True, status="Approved")
+            .order_by("-created_at")
+            .first()
+        )
+
+        # Find any pending subscription
+        pending_sub = (
+            BotSubscription.objects
+            .filter(investor=investor, status="Pending", approved=False)
+            .order_by("-created_at")
+            .first()
+        )
+
+        return Response({
+            "is_admin":        False,
+            "has_active_plan": active_sub is not None,
+            "plan":            active_sub.plan if active_sub else None,
+            "billing_period":  active_sub.billing_period if active_sub else None,
+            "subscription":    BotSubscriptionSerializer(active_sub).data if active_sub else None,
+            "pending":         BotSubscriptionSerializer(pending_sub).data if pending_sub else None,
+        })
 
     def perform_create(self, serializer):
         try:
@@ -972,7 +1023,7 @@ class BotSubscriptionViewSet(viewsets.ModelViewSet):
             )
 
         if investor.role != "admin":
-            # Block only if there's already an ACTIVE (approved) subscription.
+            # Block only if there is already an ACTIVE (approved) subscription.
             # Declined or pending subscriptions are allowed to be replaced.
             if BotSubscription.objects.filter(investor=investor, active=True, approved=True).exists():
                 raise drf_serializers.ValidationError(
@@ -1022,6 +1073,19 @@ class BotSubscriptionViewSet(viewsets.ModelViewSet):
                 return Response(
                     {"error": "status must be one of: Approved, Declined, Pending."},
                     status=400,
+                )
+
+            # When approving: deactivate all other active subscriptions for this investor
+            # so only one plan is active at a time
+            if new_status == "Approved":
+                BotSubscription.objects.filter(
+                    investor=instance.investor,
+                    active=True,
+                    approved=True,
+                ).exclude(pk=instance.pk).update(
+                    active=False,
+                    approved=False,
+                    status="Declined",
                 )
 
             instance.status   = new_status
