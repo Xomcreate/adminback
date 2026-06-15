@@ -21,6 +21,7 @@ from .models import (
     CopyTradingSubscription, COPY_TRADING_PLAN_PRICES, COPY_TRADING_PLAN_DEPOSITS,
     COPY_TRADING_TRADER_DURATIONS, COPY_TRADING_DEFAULT_DURATION_DAYS,
     BotSubscription, BOT_PLAN_PRICES, BOT_PLAN_DEPOSITS,
+    KYCSubmission,
 )
 from .serializers import (
     InvestorSerializer, InvestmentSerializer, WithdrawalSerializer,
@@ -28,6 +29,7 @@ from .serializers import (
     ReferralSerializer, ReferralStatsSerializer,
     CopyTradingSubscriptionSerializer,
     BotSubscriptionSerializer,
+    KYCSubmissionSerializer,
 )
 
 logger = logging.getLogger(__name__)
@@ -187,7 +189,7 @@ def reset_password_confirm(request):
 
 
 # ─────────────────────────────────────────────
-# FALLBACK WEBHOOK
+# FALLBACK WEBHOOK / ROI TRIGGER
 # ─────────────────────────────────────────────
 
 @api_view(["POST"])
@@ -197,11 +199,8 @@ def trigger_roi(request):
     if not token or token != settings.ROI_SECRET_TOKEN:
         return Response({"error": "Forbidden"}, status=403)
     from .tasks import apply_daily_roi
-    result = apply_daily_roi()
-
-    # Also sweep for copy-trading subscriptions whose duration has elapsed.
+    result  = apply_daily_roi()
     expired = expire_copy_trading_subscriptions()
-
     return Response({"result": result, "copy_trading_expired": expired})
 
 
@@ -210,32 +209,21 @@ def trigger_roi(request):
 # ─────────────────────────────────────────────
 
 def expire_copy_trading_subscriptions():
-    """
-    Finds all active/approved copy-trading subscriptions whose `copy_ends_at`
-    has passed, and stops them (status -> Expired, active/approved -> False).
-
-    Returns the number of subscriptions that were expired.
-    Safe to call repeatedly (idempotent) — e.g. from a daily cron via
-    trigger_roi, or from a management command.
-    """
     now = timezone.now()
-    qs = CopyTradingSubscription.objects.filter(
+    qs  = CopyTradingSubscription.objects.filter(
         active=True,
         approved=True,
         copy_ends_at__isnull=False,
         copy_ends_at__lte=now,
     )
-
     count = 0
     for sub in qs:
         with transaction.atomic():
             investor = Investor.objects.select_for_update().get(pk=sub.investor.pk)
             investor.balance += sub.deposit_amount
             investor.save(update_fields=["balance"])
-
             sub.stop_copying(status="Expired")
             sub.save(update_fields=["status", "approved", "active", "updated_at"])
-
         logger.info(
             f"[COPY TRADING EXPIRED] #{sub.pk} — {sub.investor.name} "
             f"({sub.copied_trader}) ran for {sub.duration_days} days | "
@@ -243,8 +231,172 @@ def expire_copy_trading_subscriptions():
             f"New balance: ${float(investor.balance):.2f}"
         )
         count += 1
-
     return count
+
+
+# ─────────────────────────────────────────────
+# KYC
+# ─────────────────────────────────────────────
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def kyc_submit(request):
+    """
+    POST api/kyc/submit/
+    User submits KYC documents (multipart/form-data).
+    Fields: document_type, id_front, id_back, selfie
+    Always creates a new submission — allows resubmission after rejection.
+    """
+    try:
+        investor = Investor.objects.get(user=request.user)
+    except Investor.DoesNotExist:
+        return Response({"detail": "Investor profile not found."}, status=404)
+
+    # Block if already verified or pending
+    latest = investor.kyc_submissions.order_by("-submitted_at").first()
+    if latest:
+        if latest.status == "approved":
+            return Response({"detail": "Your identity is already verified."}, status=400)
+        if latest.status == "pending":
+            return Response(
+                {"detail": "Your submission is already under review. Please wait for a decision."},
+                status=400,
+            )
+        # status == "rejected" → fall through and allow resubmission
+
+    doc_type = request.data.get("document_type", "national_id")
+    valid_doc_types = ["national_id", "passport", "drivers_license"]
+    if doc_type not in valid_doc_types:
+        return Response(
+            {"detail": f"Invalid document_type. Choose from: {', '.join(valid_doc_types)}."},
+            status=400,
+        )
+
+    id_front = request.FILES.get("id_front")
+    id_back  = request.FILES.get("id_back")
+    selfie   = request.FILES.get("selfie")
+
+    if not id_front or not id_back or not selfie:
+        return Response(
+            {"detail": "All three documents are required: id_front, id_back, selfie."},
+            status=400,
+        )
+
+    MAX_SIZE = 5 * 1024 * 1024  # 5 MB
+    for label, f in [("id_front", id_front), ("id_back", id_back), ("selfie", selfie)]:
+        if f.size > MAX_SIZE:
+            return Response({"detail": f"{label} exceeds the 5 MB size limit."}, status=400)
+
+    submission = KYCSubmission.objects.create(
+        investor      = investor,
+        document_type = doc_type,
+        id_front      = id_front,
+        id_back       = id_back,
+        selfie        = selfie,
+        status        = "pending",
+    )
+
+    logger.info(
+        f"[KYC SUBMITTED] {investor.name} ({investor.email}) "
+        f"— doc: {doc_type} — id: #{submission.pk}"
+    )
+    return Response(
+        KYCSubmissionSerializer(submission, context={"request": request}).data,
+        status=201,
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def kyc_all(request):
+    """
+    GET api/kyc/all/
+    Admin-only. Returns all KYC submissions ordered by most recent.
+    """
+    try:
+        requester = Investor.objects.get(user=request.user)
+    except Investor.DoesNotExist:
+        return Response({"detail": "Not found."}, status=404)
+
+    if requester.role != "admin":
+        return Response({"detail": "Forbidden."}, status=403)
+
+    submissions = KYCSubmission.objects.select_related("investor").order_by("-submitted_at")
+    return Response(
+        KYCSubmissionSerializer(submissions, many=True, context={"request": request}).data
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def kyc_approve(request, pk):
+    """
+    POST api/kyc/<pk>/approve/
+    Admin-only. Marks submission as approved.
+    """
+    try:
+        requester = Investor.objects.get(user=request.user)
+    except Investor.DoesNotExist:
+        return Response({"detail": "Not found."}, status=404)
+
+    if requester.role != "admin":
+        return Response({"detail": "Forbidden."}, status=403)
+
+    try:
+        submission = KYCSubmission.objects.select_related("investor").get(pk=pk)
+    except KYCSubmission.DoesNotExist:
+        return Response({"detail": "KYC submission not found."}, status=404)
+
+    if submission.status == "approved":
+        return Response({"detail": "Already approved."}, status=400)
+
+    submission.status      = "approved"
+    submission.reviewed_at = timezone.now()
+    submission.save(update_fields=["status", "reviewed_at"])
+
+    logger.info(
+        f"[KYC APPROVED] #{submission.pk} — {submission.investor.name} "
+        f"approved by admin {requester.name}"
+    )
+    return Response(
+        KYCSubmissionSerializer(submission, context={"request": request}).data
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def kyc_reject(request, pk):
+    """
+    POST api/kyc/<pk>/reject/
+    Admin-only. Marks submission as rejected.
+    """
+    try:
+        requester = Investor.objects.get(user=request.user)
+    except Investor.DoesNotExist:
+        return Response({"detail": "Not found."}, status=404)
+
+    if requester.role != "admin":
+        return Response({"detail": "Forbidden."}, status=403)
+
+    try:
+        submission = KYCSubmission.objects.select_related("investor").get(pk=pk)
+    except KYCSubmission.DoesNotExist:
+        return Response({"detail": "KYC submission not found."}, status=404)
+
+    if submission.status == "rejected":
+        return Response({"detail": "Already rejected."}, status=400)
+
+    submission.status      = "rejected"
+    submission.reviewed_at = timezone.now()
+    submission.save(update_fields=["status", "reviewed_at"])
+
+    logger.info(
+        f"[KYC REJECTED] #{submission.pk} — {submission.investor.name} "
+        f"rejected by admin {requester.name}"
+    )
+    return Response(
+        KYCSubmissionSerializer(submission, context={"request": request}).data
+    )
 
 
 # ─────────────────────────────────────────────
@@ -472,6 +624,7 @@ def user_dashboard(request):
     profile_data["active_profits"] = float(total_profits)
     profile_data["live_balance"]   = float(investor.balance) + float(total_profits)
     profile_data["bonus"]          = float(investor.bonus)
+    profile_data["kyc_status"]     = investor.kyc_status   # ← populated from property
 
     return Response({
         "profile":     profile_data,
@@ -503,6 +656,7 @@ def profile_view(request):
     data["bonus"]            = float(investor.bonus)
     data["tier"]             = get_tier(investment_count)
     data["investment_count"] = investment_count
+    data["kyc_status"]       = investor.kyc_status   # ← also expose on profile
     return Response(data)
 
 
@@ -901,8 +1055,6 @@ class CopyTradingSubscriptionViewSet(viewsets.ModelViewSet):
         except Investor.DoesNotExist:
             return CopyTradingSubscription.objects.none()
 
-        # Sweep expired subscriptions every time the list is loaded, so the
-        # UI always reflects reality even if the cron hasn't run yet.
         expire_copy_trading_subscriptions()
 
         if investor.role == "admin":
@@ -928,8 +1080,6 @@ class CopyTradingSubscriptionViewSet(viewsets.ModelViewSet):
         deposit_amount = COPY_TRADING_PLAN_DEPOSITS.get(plan, 0)
         duration_days  = COPY_TRADING_TRADER_DURATIONS.get(copied_trader, COPY_TRADING_DEFAULT_DURATION_DAYS)
 
-        # Ensure the user has enough wallet balance to cover the plan's
-        # required deposit before allowing the subscription request.
         if investor.role != "admin":
             from decimal import Decimal
             deposit_decimal = Decimal(str(deposit_amount))
@@ -960,15 +1110,14 @@ class CopyTradingSubscriptionViewSet(viewsets.ModelViewSet):
 
         instance = self.get_object()
 
-        # ── Admin path: approve / decline / reset to pending ────────────────
         if requester.role == "admin":
             new_status = request.data.get("status", "").strip()
             approved   = request.data.get("approved")
 
             if not new_status:
-                if approved is True or approved == "true" or approved is True:
+                if approved is True or approved == "true":
                     new_status = "Approved"
-                elif approved is False or approved == "false" or approved is False:
+                elif approved is False or approved == "false":
                     new_status = "Declined"
 
             if new_status not in ("Approved", "Declined", "Pending"):
@@ -988,7 +1137,6 @@ class CopyTradingSubscriptionViewSet(viewsets.ModelViewSet):
                         )
                     investor.balance -= instance.deposit_amount
                     investor.save(update_fields=["balance"])
-
                     instance.start_copying()
                     instance.save(update_fields=[
                         "status", "approved", "active",
@@ -1003,8 +1151,6 @@ class CopyTradingSubscriptionViewSet(viewsets.ModelViewSet):
                 )
             elif new_status == "Declined":
                 with transaction.atomic():
-                    # Refund the locked deposit only if it had actually been
-                    # deducted (i.e. the subscription was previously Approved).
                     if instance.status == "Approved":
                         investor = Investor.objects.select_for_update().get(pk=instance.investor.pk)
                         investor.balance += instance.deposit_amount
@@ -1014,14 +1160,13 @@ class CopyTradingSubscriptionViewSet(viewsets.ModelViewSet):
                             f"${float(instance.deposit_amount):.2f} refunded | "
                             f"New balance: ${float(investor.balance):.2f}"
                         )
-
                     instance.stop_copying(status="Declined")
                     instance.save(update_fields=["status", "approved", "active", "updated_at"])
                 logger.info(f"[COPY TRADING DECLINED] #{instance.pk} for {instance.investor.name}")
-            else:  # Pending — admin manually resets
-                instance.status   = "Pending"
-                instance.approved = False
-                instance.active   = False
+            else:
+                instance.status          = "Pending"
+                instance.approved        = False
+                instance.active          = False
                 instance.copy_started_at = None
                 instance.copy_ends_at    = None
                 instance.save(update_fields=[
@@ -1032,7 +1177,6 @@ class CopyTradingSubscriptionViewSet(viewsets.ModelViewSet):
 
             return Response(CopyTradingSubscriptionSerializer(instance).data)
 
-        # ── User path: a user may only stop their OWN active subscription ──
         if instance.investor != requester:
             return Response({"error": "Forbidden."}, status=403)
 
@@ -1048,7 +1192,6 @@ class CopyTradingSubscriptionViewSet(viewsets.ModelViewSet):
                         f"${float(instance.deposit_amount):.2f} refunded | "
                         f"New balance: ${float(investor.balance):.2f}"
                     )
-
                 instance.stop_copying(status="Declined")
                 instance.save(update_fields=["status", "approved", "active", "updated_at"])
             logger.info(
@@ -1080,14 +1223,6 @@ class CopyTradingSubscriptionViewSet(viewsets.ModelViewSet):
 # ─────────────────────────────────────────────
 
 class BotSubscriptionViewSet(viewsets.ModelViewSet):
-    """
-    GET    bot-subscriptions/              → admin: all records; user: own records (all statuses)
-    GET    bot-subscriptions/my-active/    → returns the user's current approved subscription (or 404)
-    POST   bot-subscriptions/             → user submits a new plan request
-    PATCH  bot-subscriptions/<id>/        → admin: approve / decline / reopen
-                                            user: allowed to cancel their OWN pending request
-    DELETE bot-subscriptions/<id>/        → admin only
-    """
     serializer_class   = BotSubscriptionSerializer
     permission_classes = [IsAuthenticated]
 
@@ -1098,24 +1233,15 @@ class BotSubscriptionViewSet(viewsets.ModelViewSet):
             return BotSubscription.objects.none()
         if investor.role == "admin":
             return BotSubscription.objects.all().order_by("-created_at")
-        # Return ALL of the user's own records so the frontend can determine status
         return BotSubscription.objects.filter(investor=investor).order_by("-created_at")
 
-    # ── NEW: dedicated endpoint for the user's active subscription ──────────
     @action(detail=False, methods=["get"], url_path="my-active", url_name="my-active")
     def my_active(self, request):
-        """
-        Returns the authenticated user's most recent APPROVED bot subscription.
-        Returns 404 if the user has no active subscription.
-        This endpoint is used by the frontend on page load to restore subscription
-        state after a refresh without relying on localStorage.
-        """
         try:
             investor = Investor.objects.get(user=request.user)
         except Investor.DoesNotExist:
             return Response({"error": "Investor profile not found."}, status=404)
 
-        # Admin users have full access; return a synthetic response
         if investor.role == "admin":
             return Response({
                 "is_admin":        True,
@@ -1126,15 +1252,12 @@ class BotSubscriptionViewSet(viewsets.ModelViewSet):
                 "pending":         None,
             })
 
-        # Find the most recently approved subscription
         active_sub = (
             BotSubscription.objects
             .filter(investor=investor, approved=True, active=True, status="Approved")
             .order_by("-created_at")
             .first()
         )
-
-        # Find any pending subscription
         pending_sub = (
             BotSubscription.objects
             .filter(investor=investor, status="Pending", approved=False)
@@ -1163,17 +1286,11 @@ class BotSubscriptionViewSet(viewsets.ModelViewSet):
         valid_periods  = ["weekly", "monthly", "yearly"]
 
         if plan not in valid_plans:
-            raise drf_serializers.ValidationError(
-                f"Invalid plan. Choose from: {', '.join(valid_plans)}."
-            )
+            raise drf_serializers.ValidationError(f"Invalid plan. Choose from: {', '.join(valid_plans)}.")
         if billing_period not in valid_periods:
-            raise drf_serializers.ValidationError(
-                f"Invalid billing period. Choose from: {', '.join(valid_periods)}."
-            )
+            raise drf_serializers.ValidationError(f"Invalid billing period. Choose from: {', '.join(valid_periods)}.")
 
         if investor.role != "admin":
-            # Block only if there is already an ACTIVE (approved) subscription.
-            # Declined or pending subscriptions are allowed to be replaced.
             if BotSubscription.objects.filter(investor=investor, active=True, approved=True).exists():
                 raise drf_serializers.ValidationError(
                     "You already have an active bot subscription. "
@@ -1206,12 +1323,10 @@ class BotSubscriptionViewSet(viewsets.ModelViewSet):
         except Investor.DoesNotExist:
             return Response({"error": "Not found."}, status=404)
 
-        # ── Admin path ──────────────────────────────────────────────────────
         if requester.role == "admin":
             new_status = request.data.get("status", "").strip()
             approved   = request.data.get("approved")
 
-            # Derive status from approved flag when status isn't sent directly
             if not new_status:
                 if approved is True or approved == "true":
                     new_status = "Approved"
@@ -1224,8 +1339,6 @@ class BotSubscriptionViewSet(viewsets.ModelViewSet):
                     status=400,
                 )
 
-            # When approving: deactivate all other active subscriptions for this investor
-            # so only one plan is active at a time
             if new_status == "Approved":
                 BotSubscription.objects.filter(
                     investor=instance.investor,
@@ -1247,7 +1360,6 @@ class BotSubscriptionViewSet(viewsets.ModelViewSet):
             )
             return Response(BotSubscriptionSerializer(instance).data)
 
-        # ── User path: only allow cancelling their own pending sub ──────────
         if instance.investor != requester:
             return Response({"error": "Forbidden."}, status=403)
 
@@ -1257,9 +1369,7 @@ class BotSubscriptionViewSet(viewsets.ModelViewSet):
             instance.approved = False
             instance.active   = False
             instance.save(update_fields=["status", "approved", "active"])
-            logger.info(
-                f"[BOT SUBSCRIPTION CANCELLED] #{instance.pk} by user {requester.name}"
-            )
+            logger.info(f"[BOT SUBSCRIPTION CANCELLED] #{instance.pk} by user {requester.name}")
             return Response(BotSubscriptionSerializer(instance).data)
 
         return Response({"error": "Forbidden."}, status=403)

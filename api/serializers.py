@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from .models import (
     Investor, Investment, Withdrawal, Deposit, Referral,
-    CopyTradingSubscription, BotSubscription,
+    CopyTradingSubscription, BotSubscription, KYCSubmission,
 )
 
 MIN_AMOUNT = 500
@@ -9,7 +9,8 @@ MAX_AMOUNT = 10_000_000
 
 
 class InvestorSerializer(serializers.ModelSerializer):
-    tier = serializers.ReadOnlyField()
+    tier       = serializers.ReadOnlyField()
+    kyc_status = serializers.ReadOnlyField()
 
     class Meta:
         model  = Investor
@@ -79,6 +80,41 @@ class ChangePasswordSerializer(serializers.Serializer):
 
 class ForgotPasswordSerializer(serializers.Serializer):
     email = serializers.EmailField(required=True)
+
+
+# ─────────────────────────────────────────────
+# KYC
+# ─────────────────────────────────────────────
+
+class KYCSubmissionSerializer(serializers.ModelSerializer):
+    name             = serializers.SerializerMethodField()
+    email            = serializers.SerializerMethodField()
+    doc_type_display = serializers.ReadOnlyField()
+    # Alias 'document_type' → 'doc' for the admin table frontend
+    doc              = serializers.SerializerMethodField()
+    submitted        = serializers.SerializerMethodField()
+
+    class Meta:
+        model  = KYCSubmission
+        fields = [
+            "id", "investor", "name", "email",
+            "document_type", "doc", "doc_type_display",
+            "id_front", "id_back", "selfie",
+            "status", "submitted", "submitted_at", "reviewed_at",
+        ]
+        read_only_fields = ["investor", "status", "submitted_at", "reviewed_at"]
+
+    def get_name(self, obj):
+        return obj.investor.name or obj.investor.email or "Unknown"
+
+    def get_email(self, obj):
+        return obj.investor.email or ""
+
+    def get_doc(self, obj):
+        return obj.doc_type_display
+
+    def get_submitted(self, obj):
+        return obj.submitted_at.strftime("%b %d, %Y") if obj.submitted_at else "—"
 
 
 # ─────────────────────────────────────────────

@@ -22,6 +22,11 @@ from .views import (
     change_password,
     forgot_password,
     reset_password_confirm,
+    # ── KYC ──
+    kyc_submit,
+    kyc_all,
+    kyc_approve,
+    kyc_reject,
 )
 
 router = DefaultRouter()
@@ -33,15 +38,13 @@ router.register("referrals",                  ReferralViewSet,                ba
 router.register("copy-trading-subscriptions", CopyTradingSubscriptionViewSet, basename="copy-trading-subscription")
 router.register("bot-subscriptions",          BotSubscriptionViewSet,         basename="bot-subscription")
 
-# Custom actions that must be declared BEFORE router.urls to avoid
-# being matched as detail routes (e.g. pk="my-active" or pk="my-stats")
-referral_my_stats      = ReferralViewSet.as_view({"get": "my_stats"})
-bot_my_active          = BotSubscriptionViewSet.as_view({"get": "my_active"})
+referral_my_stats = ReferralViewSet.as_view({"get": "my_stats"})
+bot_my_active     = BotSubscriptionViewSet.as_view({"get": "my_active"})
 
 urlpatterns = [
-    # ── Custom actions (must come before router include) ──────────────────
-    path("referrals/my-stats/",           referral_my_stats, name="referral-my-stats"),
-    path("bot-subscriptions/my-active/",  bot_my_active,     name="bot-subscription-my-active"),
+    # ── Custom ViewSet actions (before router to avoid pk conflicts) ───────
+    path("referrals/my-stats/",          referral_my_stats, name="referral-my-stats"),
+    path("bot-subscriptions/my-active/", bot_my_active,     name="bot-subscription-my-active"),
 
     # ── Router ────────────────────────────────────────────────────────────
     path("", include(router.urls)),
@@ -65,6 +68,12 @@ urlpatterns = [
     path("top-investors/",                   top_investors),
     path("investments/<int:pk>/approve/",    approve_investment),
     path("investments/<int:pk>/add_profit/", add_profit),
+
+    # ── KYC ───────────────────────────────────────────────────────────────
+    path("kyc/submit/",             kyc_submit),
+    path("kyc/all/",                kyc_all),
+    path("kyc/<int:pk>/approve/",   kyc_approve),
+    path("kyc/<int:pk>/reject/",    kyc_reject),
 
     # ── Misc ──────────────────────────────────────────────────────────────
     path("trigger-roi/", trigger_roi),

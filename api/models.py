@@ -55,6 +55,14 @@ class Investor(models.Model):
             return "silver"
         return "none"
 
+    @property
+    def kyc_status(self):
+        """Returns the latest KYC status for this investor."""
+        latest = self.kyc_submissions.order_by("-submitted_at").first()
+        if not latest:
+            return "unverified"
+        return latest.status
+
 
 class Investment(models.Model):
     TYPE_CHOICES = (
@@ -153,6 +161,42 @@ class Referral(models.Model):
 
 
 # ─────────────────────────────────────────────
+# KYC SUBMISSION
+# ─────────────────────────────────────────────
+
+class KYCSubmission(models.Model):
+    DOC_TYPE_CHOICES = (
+        ("national_id",      "National ID"),
+        ("passport",         "Passport"),
+        ("drivers_license",  "Driver's License"),
+    )
+    STATUS_CHOICES = (
+        ("pending",  "Pending"),
+        ("approved", "Approved"),
+        ("rejected", "Rejected"),
+    )
+
+    investor      = models.ForeignKey(Investor, on_delete=models.CASCADE, related_name="kyc_submissions")
+    document_type = models.CharField(max_length=20, choices=DOC_TYPE_CHOICES, default="national_id")
+    id_front      = models.ImageField(upload_to="kyc/id_front/")
+    id_back       = models.ImageField(upload_to="kyc/id_back/")
+    selfie        = models.ImageField(upload_to="kyc/selfies/")
+    status        = models.CharField(max_length=10, choices=STATUS_CHOICES, default="pending")
+    submitted_at  = models.DateTimeField(auto_now_add=True)
+    reviewed_at   = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-submitted_at"]
+
+    def __str__(self):
+        return f"{self.investor.name} — KYC [{self.status}] @ {self.submitted_at:%Y-%m-%d}"
+
+    @property
+    def doc_type_display(self):
+        return dict(self.DOC_TYPE_CHOICES).get(self.document_type, self.document_type)
+
+
+# ─────────────────────────────────────────────
 # COPY TRADING
 # ─────────────────────────────────────────────
 
@@ -178,8 +222,6 @@ COPY_TRADING_PLAN_DEPOSITS = {
     "Institutional": 10000,
 }
 
-# Mirrors the `duration` shown on each trader card in the frontend (traders[].duration).
-# Used to compute when an approved copy-trading subscription auto-expires.
 COPY_TRADING_TRADER_DURATIONS = {
     "Alex Mercer":   14,
     "Sofia Chen":    30,
@@ -202,8 +244,7 @@ class CopyTradingSubscription(models.Model):
     deposit_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     copied_trader  = models.CharField(max_length=100, blank=True, default="")
 
-    # Duration / expiry tracking
-    duration_days  = models.PositiveIntegerField(default=COPY_TRADING_DEFAULT_DURATION_DAYS)
+    duration_days   = models.PositiveIntegerField(default=COPY_TRADING_DEFAULT_DURATION_DAYS)
     copy_started_at = models.DateTimeField(null=True, blank=True)
     copy_ends_at    = models.DateTimeField(null=True, blank=True)
 
@@ -217,7 +258,6 @@ class CopyTradingSubscription(models.Model):
         return f"{self.investor.name} — {self.plan} [{self.status}]"
 
     def start_copying(self):
-        """Call when admin approves the subscription. Sets the run window."""
         now = timezone.now()
         self.copy_started_at = now
         self.copy_ends_at    = now + timezone.timedelta(days=self.duration_days)
@@ -226,7 +266,6 @@ class CopyTradingSubscription(models.Model):
         self.active   = True
 
     def stop_copying(self, status="Declined"):
-        """Call to manually cancel or to mark as expired."""
         self.status   = status
         self.approved = False
         self.active   = False
@@ -273,10 +312,6 @@ BOT_PLAN_DEPOSITS = {
 
 
 class BotSubscription(models.Model):
-    """
-    Tracks a user's AI trading bot plan subscription.
-    Admin can approve / decline / delete records.
-    """
     investor       = models.ForeignKey(Investor, on_delete=models.CASCADE, related_name="bot_subscriptions")
     plan           = models.CharField(max_length=20, choices=BOT_SUBSCRIPTION_PLAN_CHOICES, default="Starter")
     billing_period = models.CharField(max_length=10, choices=BOT_BILLING_PERIOD_CHOICES, default="monthly")
