@@ -241,18 +241,11 @@ def expire_copy_trading_subscriptions():
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def kyc_submit(request):
-    """
-    POST api/kyc/submit/
-    User submits KYC documents (multipart/form-data).
-    Fields: document_type, id_front, id_back, selfie
-    Always creates a new submission — allows resubmission after rejection.
-    """
     try:
         investor = Investor.objects.get(user=request.user)
     except Investor.DoesNotExist:
         return Response({"detail": "Investor profile not found."}, status=404)
 
-    # Block if already verified or pending
     latest = investor.kyc_submissions.order_by("-submitted_at").first()
     if latest:
         if latest.status == "approved":
@@ -262,7 +255,6 @@ def kyc_submit(request):
                 {"detail": "Your submission is already under review. Please wait for a decision."},
                 status=400,
             )
-        # status == "rejected" → fall through and allow resubmission
 
     doc_type = request.data.get("document_type", "national_id")
     valid_doc_types = ["national_id", "passport", "drivers_license"]
@@ -282,7 +274,7 @@ def kyc_submit(request):
             status=400,
         )
 
-    MAX_SIZE = 5 * 1024 * 1024  # 5 MB
+    MAX_SIZE = 5 * 1024 * 1024
     for label, f in [("id_front", id_front), ("id_back", id_back), ("selfie", selfie)]:
         if f.size > MAX_SIZE:
             return Response({"detail": f"{label} exceeds the 5 MB size limit."}, status=400)
@@ -309,10 +301,6 @@ def kyc_submit(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def kyc_all(request):
-    """
-    GET api/kyc/all/
-    Admin-only. Returns all KYC submissions ordered by most recent.
-    """
     try:
         requester = Investor.objects.get(user=request.user)
     except Investor.DoesNotExist:
@@ -330,10 +318,6 @@ def kyc_all(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def kyc_approve(request, pk):
-    """
-    POST api/kyc/<pk>/approve/
-    Admin-only. Marks submission as approved.
-    """
     try:
         requester = Investor.objects.get(user=request.user)
     except Investor.DoesNotExist:
@@ -366,10 +350,6 @@ def kyc_approve(request, pk):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def kyc_reject(request, pk):
-    """
-    POST api/kyc/<pk>/reject/
-    Admin-only. Marks submission as rejected.
-    """
     try:
         requester = Investor.objects.get(user=request.user)
     except Investor.DoesNotExist:
@@ -624,7 +604,7 @@ def user_dashboard(request):
     profile_data["active_profits"] = float(total_profits)
     profile_data["live_balance"]   = float(investor.balance) + float(total_profits)
     profile_data["bonus"]          = float(investor.bonus)
-    profile_data["kyc_status"]     = investor.kyc_status   # ← populated from property
+    profile_data["kyc_status"]     = investor.kyc_status
 
     return Response({
         "profile":     profile_data,
@@ -656,7 +636,7 @@ def profile_view(request):
     data["bonus"]            = float(investor.bonus)
     data["tier"]             = get_tier(investment_count)
     data["investment_count"] = investment_count
-    data["kyc_status"]       = investor.kyc_status   # ← also expose on profile
+    data["kyc_status"]       = investor.kyc_status
     return Response(data)
 
 
@@ -1219,7 +1199,7 @@ class CopyTradingSubscriptionViewSet(viewsets.ModelViewSet):
 
 
 # ─────────────────────────────────────────────
-# BOT SUBSCRIPTION VIEWSET
+# BOT SUBSCRIPTION VIEWSET  ← FIXED
 # ─────────────────────────────────────────────
 
 class BotSubscriptionViewSet(viewsets.ModelViewSet):
@@ -1286,15 +1266,29 @@ class BotSubscriptionViewSet(viewsets.ModelViewSet):
         valid_periods  = ["weekly", "monthly", "yearly"]
 
         if plan not in valid_plans:
-            raise drf_serializers.ValidationError(f"Invalid plan. Choose from: {', '.join(valid_plans)}.")
+            raise drf_serializers.ValidationError(
+                f"Invalid plan. Choose from: {', '.join(valid_plans)}."
+            )
         if billing_period not in valid_periods:
-            raise drf_serializers.ValidationError(f"Invalid billing period. Choose from: {', '.join(valid_periods)}.")
+            raise drf_serializers.ValidationError(
+                f"Invalid billing period. Choose from: {', '.join(valid_periods)}."
+            )
 
         if investor.role != "admin":
+            # FIX 1: Block if already has an ACTIVE approved subscription
             if BotSubscription.objects.filter(investor=investor, active=True, approved=True).exists():
                 raise drf_serializers.ValidationError(
                     "You already have an active bot subscription. "
-                    "Please upgrade from the plans page instead."
+                    "Please contact support to upgrade or change your plan."
+                )
+            # FIX 2: Block if already has a PENDING subscription (was missing before)
+            existing_pending = BotSubscription.objects.filter(
+                investor=investor, status="Pending", approved=False
+            ).first()
+            if existing_pending:
+                raise drf_serializers.ValidationError(
+                    f"You already have a pending {existing_pending.plan} plan request awaiting admin approval. "
+                    "Please wait for it to be reviewed before submitting a new one."
                 )
 
         plan_fee       = BOT_PLAN_PRICES.get(billing_period, {}).get(plan, 0)
@@ -1340,6 +1334,7 @@ class BotSubscriptionViewSet(viewsets.ModelViewSet):
                 )
 
             if new_status == "Approved":
+                # Deactivate any other active subscriptions for this investor
                 BotSubscription.objects.filter(
                     investor=instance.investor,
                     active=True,
@@ -1349,11 +1344,19 @@ class BotSubscriptionViewSet(viewsets.ModelViewSet):
                     approved=False,
                     status="Declined",
                 )
+                # FIX 3: Also cancel other pending subs for this investor when approving one
+                BotSubscription.objects.filter(
+                    investor=instance.investor,
+                    status="Pending",
+                    approved=False,
+                ).exclude(pk=instance.pk).update(
+                    status="Declined",
+                )
 
             instance.status   = new_status
             instance.approved = (new_status == "Approved")
             instance.active   = (new_status == "Approved")
-            instance.save(update_fields=["status", "approved", "active"])
+            instance.save(update_fields=["status", "approved", "active", "updated_at"])
             logger.info(
                 f"[BOT SUBSCRIPTION UPDATE] #{instance.pk} → {new_status} "
                 f"for {instance.investor.name}"
@@ -1368,7 +1371,7 @@ class BotSubscriptionViewSet(viewsets.ModelViewSet):
             instance.status   = "Declined"
             instance.approved = False
             instance.active   = False
-            instance.save(update_fields=["status", "approved", "active"])
+            instance.save(update_fields=["status", "approved", "active", "updated_at"])
             logger.info(f"[BOT SUBSCRIPTION CANCELLED] #{instance.pk} by user {requester.name}")
             return Response(BotSubscriptionSerializer(instance).data)
 
