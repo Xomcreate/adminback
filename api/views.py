@@ -880,7 +880,7 @@ class CopyTradingSubscriptionViewSet(viewsets.ModelViewSet):
             deposit_amount=deposit_amount, copied_trader=copied_trader,
             status="Pending", approved=False, active=False,
         )
-        logger.info(f"[COPY TRADING] {investor.name} subscribed to {plan} plan (fee=${plan_fee}, deposit=${deposit_amount})")
+        logger.info(f"[COPY TRADING] {investor.name} subscribed to {plan} plan (fee={plan_fee}, deposit={deposit_amount})")
 
     def partial_update(self, request, *args, **kwargs):
         try:
@@ -927,15 +927,16 @@ class CopyTradingSubscriptionViewSet(viewsets.ModelViewSet):
 
 
 # ─────────────────────────────────────────────
-# BOT SUBSCRIPTION VIEWSET
+# BOT SUBSCRIPTION VIEWSET  ← KEY FIXES HERE
 # ─────────────────────────────────────────────
 
 class BotSubscriptionViewSet(viewsets.ModelViewSet):
     """
-    GET    bot-subscriptions/       → admin: all; user: own
-    POST   bot-subscriptions/       → user submits a plan request
-    PATCH  bot-subscriptions/<id>/  → admin approve / decline
-    DELETE bot-subscriptions/<id>/  → admin delete
+    GET    bot-subscriptions/       → admin: all records; user: own records (all statuses)
+    POST   bot-subscriptions/       → user submits a new plan request
+    PATCH  bot-subscriptions/<id>/  → admin: approve / decline / reopen
+                                      user: allowed to cancel their OWN pending request
+    DELETE bot-subscriptions/<id>/  → admin only
     """
     serializer_class   = BotSubscriptionSerializer
     permission_classes = [IsAuthenticated]
@@ -947,6 +948,7 @@ class BotSubscriptionViewSet(viewsets.ModelViewSet):
             return BotSubscription.objects.none()
         if investor.role == "admin":
             return BotSubscription.objects.all().order_by("-created_at")
+        # Return ALL of the user's own records so the frontend can determine status
         return BotSubscription.objects.filter(investor=investor).order_by("-created_at")
 
     def perform_create(self, serializer):
@@ -961,51 +963,93 @@ class BotSubscriptionViewSet(viewsets.ModelViewSet):
         valid_periods  = ["weekly", "monthly", "yearly"]
 
         if plan not in valid_plans:
-            raise drf_serializers.ValidationError(f"Invalid plan. Choose from: {', '.join(valid_plans)}.")
+            raise drf_serializers.ValidationError(
+                f"Invalid plan. Choose from: {', '.join(valid_plans)}."
+            )
         if billing_period not in valid_periods:
-            raise drf_serializers.ValidationError(f"Invalid billing period. Choose from: {', '.join(valid_periods)}.")
+            raise drf_serializers.ValidationError(
+                f"Invalid billing period. Choose from: {', '.join(valid_periods)}."
+            )
 
         if investor.role != "admin":
-            if BotSubscription.objects.filter(investor=investor, active=True).exists():
-                raise drf_serializers.ValidationError("You already have an active bot subscription.")
+            # Block only if there's already an ACTIVE (approved) subscription.
+            # Declined or pending subscriptions are allowed to be replaced.
+            if BotSubscription.objects.filter(investor=investor, active=True, approved=True).exists():
+                raise drf_serializers.ValidationError(
+                    "You already have an active bot subscription. "
+                    "Please upgrade from the plans page instead."
+                )
 
         plan_fee       = BOT_PLAN_PRICES.get(billing_period, {}).get(plan, 0)
         deposit_amount = BOT_PLAN_DEPOSITS.get(plan, 0)
 
         serializer.save(
-            investor=investor, plan=plan, billing_period=billing_period,
-            plan_fee=plan_fee, deposit_amount=deposit_amount,
-            status="Pending", approved=False, active=False,
+            investor=investor,
+            plan=plan,
+            billing_period=billing_period,
+            plan_fee=plan_fee,
+            deposit_amount=deposit_amount,
+            status="Pending",
+            approved=False,
+            active=False,
         )
-        logger.info(f"[BOT SUBSCRIPTION] {investor.name} requested {plan} / {billing_period} (fee=${plan_fee}, deposit=${deposit_amount})")
+        logger.info(
+            f"[BOT SUBSCRIPTION] {investor.name} requested {plan} / {billing_period} "
+            f"(fee={plan_fee}, deposit={deposit_amount})"
+        )
 
     def partial_update(self, request, *args, **kwargs):
+        instance = self.get_object()
+
         try:
             requester = Investor.objects.get(user=request.user)
         except Investor.DoesNotExist:
             return Response({"error": "Not found."}, status=404)
-        if requester.role != "admin":
+
+        # ── Admin path ──────────────────────────────────────────────────────
+        if requester.role == "admin":
+            new_status = request.data.get("status", "").strip()
+            approved   = request.data.get("approved")
+
+            # Derive status from approved flag when status isn't sent directly
+            if not new_status:
+                if approved is True or approved == "true":
+                    new_status = "Approved"
+                elif approved is False or approved == "false":
+                    new_status = "Declined"
+
+            if new_status not in ("Approved", "Declined", "Pending"):
+                return Response(
+                    {"error": "status must be one of: Approved, Declined, Pending."},
+                    status=400,
+                )
+
+            instance.status   = new_status
+            instance.approved = (new_status == "Approved")
+            instance.active   = (new_status == "Approved")
+            instance.save(update_fields=["status", "approved", "active"])
+            logger.info(
+                f"[BOT SUBSCRIPTION UPDATE] #{instance.pk} → {new_status} "
+                f"for {instance.investor.name}"
+            )
+            return Response(BotSubscriptionSerializer(instance).data)
+
+        # ── User path: only allow cancelling their own pending sub ──────────
+        if instance.investor != requester:
             return Response({"error": "Forbidden."}, status=403)
 
-        instance   = self.get_object()
         new_status = request.data.get("status", "").strip()
-        approved   = request.data.get("approved")
+        if new_status == "Declined" and instance.status == "Pending":
+            instance.status   = "Declined"
+            instance.approved = False
+            instance.active   = False
+            instance.save(update_fields=["status", "approved", "active"])
+            logger.info(
+                f"[BOT SUBSCRIPTION CANCELLED] #{instance.pk} by user {requester.name}"
+            )
+            return Response(BotSubscriptionSerializer(instance).data)
 
-        if not new_status:
-            if approved is True or approved == "true":
-                new_status = "Approved"
-            elif approved is False or approved == "false":
-                new_status = "Declined"
-
-        if new_status not in ("Approved", "Declined", "Pending"):
-            return Response({"error": "status must be one of: Approved, Declined, Pending."}, status=400)
-
-        instance.status   = new_status
-        instance.approved = (new_status == "Approved")
-        instance.active   = (new_status == "Approved")
-        instance.save(update_fields=["status", "approved", "active"])
-        logger.info(f"[BOT SUBSCRIPTION UPDATE] #{instance.pk} → {new_status} for {instance.investor.name}")
-        return Response(BotSubscriptionSerializer(instance).data)
+        return Response({"error": "Forbidden."}, status=403)
 
     def update(self, request, *args, **kwargs):
         kwargs["partial"] = True
@@ -1019,5 +1063,8 @@ class BotSubscriptionViewSet(viewsets.ModelViewSet):
         if requester.role != "admin":
             return Response({"error": "Forbidden."}, status=403)
         instance = self.get_object()
-        logger.info(f"[BOT SUBSCRIPTION DELETED] #{instance.pk} — {instance.investor.name} / {instance.plan}")
+        logger.info(
+            f"[BOT SUBSCRIPTION DELETED] #{instance.pk} — "
+            f"{instance.investor.name} / {instance.plan}"
+        )
         return super().destroy(request, *args, **kwargs)
