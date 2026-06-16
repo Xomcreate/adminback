@@ -2,6 +2,12 @@ from django.db import models
 from django.contrib.auth.models import User
 from django.utils import timezone
 
+# ── Cloudinary ──────────────────────────────────────────────────────────────
+# All ImageFields that need cloud persistence use CloudinaryField.
+# Make sure cloudinary is installed:  pip install cloudinary django-cloudinary-storage
+# and INSTALLED_APPS includes 'cloudinary_storage' and 'cloudinary'.
+from cloudinary.models import CloudinaryField
+
 
 NETWORK_MAP = {
     "BTC":  "Bitcoin Network",
@@ -83,7 +89,8 @@ class Investment(models.Model):
     daily_roi      = models.DecimalField(max_digits=5, decimal_places=2, default=10.0)
     current_profit = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     payment_method = models.CharField(max_length=50, default="BTC")
-    payment_proof  = models.ImageField(upload_to="proofs/", blank=True, null=True)
+    # ── Cloudinary ──
+    payment_proof  = CloudinaryField("investment_proof", blank=True, null=True)
     active         = models.BooleanField(default=False)
     approved       = models.BooleanField(default=False)
     status         = models.CharField(max_length=20, choices=STATUS_CHOICES, default="Pending")
@@ -115,7 +122,8 @@ class Deposit(models.Model):
     investor       = models.ForeignKey(Investor, on_delete=models.CASCADE, related_name="deposits")
     payment_method = models.CharField(max_length=10)
     amount         = models.DecimalField(max_digits=12, decimal_places=2)
-    payment_proof  = models.ImageField(upload_to="deposit_proofs/", blank=True, null=True)
+    # ── Cloudinary ── (was: ImageField upload_to="deposit_proofs/")
+    payment_proof  = CloudinaryField("deposit_proof", blank=True, null=True)
     status         = models.CharField(max_length=10, choices=STATUS_CHOICES, default="pending")
     created_at     = models.DateTimeField(auto_now_add=True)
 
@@ -178,9 +186,10 @@ class KYCSubmission(models.Model):
 
     investor      = models.ForeignKey(Investor, on_delete=models.CASCADE, related_name="kyc_submissions")
     document_type = models.CharField(max_length=20, choices=DOC_TYPE_CHOICES, default="national_id")
-    id_front      = models.ImageField(upload_to="kyc/id_front/")
-    id_back       = models.ImageField(upload_to="kyc/id_back/")
-    selfie        = models.ImageField(upload_to="kyc/selfies/")
+    # ── Cloudinary ──
+    id_front      = CloudinaryField("kyc_id_front")
+    id_back       = CloudinaryField("kyc_id_back")
+    selfie        = CloudinaryField("kyc_selfie")
     status        = models.CharField(max_length=10, choices=STATUS_CHOICES, default="pending")
     submitted_at  = models.DateTimeField(auto_now_add=True)
     reviewed_at   = models.DateTimeField(null=True, blank=True)
