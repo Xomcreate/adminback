@@ -3,10 +3,13 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.contrib.auth.models import User
+from django.contrib.auth.tokens import default_token_generator
 from django.core.mail import send_mail
 from django.db import models, transaction
 from django.db.models import Sum
 from django.utils import timezone
+from django.utils.encoding import force_bytes, force_str
+from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from rest_framework import viewsets, status
 from rest_framework.decorators import api_view, permission_classes, action
 from rest_framework.permissions import IsAuthenticated, AllowAny
@@ -18,7 +21,7 @@ from .models import (
     CopyTradingSubscription, COPY_TRADING_PLAN_PRICES, COPY_TRADING_PLAN_DEPOSITS,
     COPY_TRADING_TRADER_DURATIONS, COPY_TRADING_DEFAULT_DURATION_DAYS,
     BotSubscription, BOT_PLAN_PRICES, BOT_PLAN_DEPOSITS,
-    KYCSubmission, PasswordResetOTP,
+    KYCSubmission,
 )
 from .serializers import (
     InvestorSerializer, InvestmentSerializer, WithdrawalSerializer,
@@ -58,7 +61,7 @@ def get_tier(investment_count):
 
 
 # ─────────────────────────────────────────────
-# AUTH — REGISTER
+# AUTH
 # ─────────────────────────────────────────────
 
 @api_view(["POST"])
@@ -101,7 +104,7 @@ def register(request):
 
 
 # ─────────────────────────────────────────────
-# AUTH — CHANGE PASSWORD
+# CHANGE PASSWORD
 # ─────────────────────────────────────────────
 
 @api_view(["POST"])
@@ -119,7 +122,7 @@ def change_password(request):
 
 
 # ─────────────────────────────────────────────
-# AUTH — FORGOT PASSWORD (sends OTP)
+# FORGOT PASSWORD
 # ─────────────────────────────────────────────
 
 @api_view(["POST"])
@@ -130,113 +133,67 @@ def forgot_password(request):
         return Response(serializer.errors, status=400)
 
     email            = serializer.validated_data["email"]
-    generic_response = Response({"message": "If this email exists, a 6-digit code will be sent."})
+    generic_response = Response({"message": "If this email exists, a password reset link will be sent."})
 
     try:
         user = User.objects.get(email=email)
     except User.DoesNotExist:
         return generic_response
 
-    # Invalidate all previous unused OTPs for this user
-    PasswordResetOTP.objects.filter(user=user, used=False).update(used=True)
-
-    code = PasswordResetOTP.generate_code()
-    PasswordResetOTP.objects.create(user=user, code=code)
+    uid        = urlsafe_base64_encode(force_bytes(user.pk))
+    token      = default_token_generator.make_token(user)
+    reset_link = f"{FRONTEND_URL}/reset-password/{uid}/{token}/"
 
     try:
         send_mail(
-            subject="Your Password Reset Code",
+            subject="Password Reset Request",
             message=(
                 f"Hi {user.username},\n\n"
-                f"Your password reset code is: {code}\n\n"
-                f"This code expires in 10 minutes.\n"
-                f"If you didn't request this, please ignore this email."
+                f"Click the link below to reset your password:\n{reset_link}\n\n"
+                f"If you didn't request this, ignore this email."
             ),
             from_email=settings.DEFAULT_FROM_EMAIL,
             recipient_list=[email],
-            fail_silently=False,
+            fail_silently=False,  # ← changed so errors show in Render logs
         )
-        logger.info(f"[FORGOT PASSWORD] OTP sent to {email}")
+        logger.info(f"[FORGOT PASSWORD] Reset email sent to {email}")
     except Exception as e:
-        logger.error(f"[FORGOT PASSWORD] Failed to send OTP to {email}: {e}")
+        logger.error(f"[FORGOT PASSWORD] Failed to send email to {email}: {e}")
 
     return generic_response
 
-
 # ─────────────────────────────────────────────
-# AUTH — VERIFY OTP
-# ─────────────────────────────────────────────
-
-@api_view(["POST"])
-@permission_classes([AllowAny])
-def verify_otp(request):
-    email = request.data.get("email", "").strip()
-    code  = request.data.get("code", "").strip()
-
-    if not email or not code:
-        return Response({"error": "email and code are required."}, status=400)
-
-    try:
-        user = User.objects.get(email=email)
-    except User.DoesNotExist:
-        return Response({"error": "Invalid code."}, status=400)
-
-    otp = (
-        PasswordResetOTP.objects
-        .filter(user=user, code=code, used=False)
-        .order_by("-created_at")
-        .first()
-    )
-
-    if not otp or not otp.is_valid():
-        return Response({"error": "Invalid or expired code."}, status=400)
-
-    return Response({"message": "Code verified. You may now reset your password."})
-
-
-# ─────────────────────────────────────────────
-# AUTH — RESET PASSWORD CONFIRM (consumes OTP)
+# RESET PASSWORD CONFIRM
 # ─────────────────────────────────────────────
 
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def reset_password_confirm(request):
-    email        = request.data.get("email", "").strip()
-    code         = request.data.get("code", "").strip()
+    uid          = request.data.get("uid")
+    token        = request.data.get("token")
     new_password = request.data.get("new_password", "")
 
-    if not email or not code or not new_password:
-        return Response({"error": "email, code, and new_password are required."}, status=400)
+    if not uid or not token or not new_password:
+        return Response({"error": "uid, token, and new_password are required."}, status=400)
     if len(new_password) < 8:
         return Response({"error": "Password must be at least 8 characters."}, status=400)
 
     try:
-        user = User.objects.get(email=email)
-    except User.DoesNotExist:
-        return Response({"error": "Invalid code."}, status=400)
+        user_pk = force_str(urlsafe_base64_decode(uid))
+        user    = User.objects.get(pk=user_pk)
+    except (User.DoesNotExist, ValueError, TypeError):
+        return Response({"error": "Invalid reset link."}, status=400)
 
-    otp = (
-        PasswordResetOTP.objects
-        .filter(user=user, code=code, used=False)
-        .order_by("-created_at")
-        .first()
-    )
+    if not default_token_generator.check_token(user, token):
+        return Response({"error": "Reset link is invalid or has expired."}, status=400)
 
-    if not otp or not otp.is_valid():
-        return Response({"error": "Invalid or expired code."}, status=400)
-
-    with transaction.atomic():
-        otp.used = True
-        otp.save(update_fields=["used"])
-        user.set_password(new_password)
-        user.save()
-
-    logger.info(f"[RESET PASSWORD] Password reset for {email} via OTP")
+    user.set_password(new_password)
+    user.save()
     return Response({"message": "Password reset successfully. You can now log in."})
 
 
 # ─────────────────────────────────────────────
-# ROI TRIGGER
+# FALLBACK WEBHOOK / ROI TRIGGER
 # ─────────────────────────────────────────────
 
 @api_view(["POST"])
@@ -303,7 +260,7 @@ def kyc_submit(request):
                 status=400,
             )
 
-    doc_type       = request.data.get("document_type", "national_id")
+    doc_type = request.data.get("document_type", "national_id")
     valid_doc_types = ["national_id", "passport", "drivers_license"]
     if doc_type not in valid_doc_types:
         return Response(
@@ -389,7 +346,9 @@ def kyc_approve(request, pk):
         f"[KYC APPROVED] #{submission.pk} — {submission.investor.name} "
         f"approved by admin {requester.name}"
     )
-    return Response(KYCSubmissionSerializer(submission, context={"request": request}).data)
+    return Response(
+        KYCSubmissionSerializer(submission, context={"request": request}).data
+    )
 
 
 @api_view(["POST"])
@@ -419,7 +378,9 @@ def kyc_reject(request, pk):
         f"[KYC REJECTED] #{submission.pk} — {submission.investor.name} "
         f"rejected by admin {requester.name}"
     )
-    return Response(KYCSubmissionSerializer(submission, context={"request": request}).data)
+    return Response(
+        KYCSubmissionSerializer(submission, context={"request": request}).data
+    )
 
 
 # ─────────────────────────────────────────────
@@ -899,6 +860,10 @@ class WithdrawalViewSet(viewsets.ModelViewSet):
         return super().update(request, *args, **kwargs)
 
 
+# ─────────────────────────────────────────────
+# DEPOSIT VIEWSET
+# ─────────────────────────────────────────────
+
 class DepositViewSet(viewsets.ModelViewSet):
     queryset           = Deposit.objects.all().order_by("-created_at")
     serializer_class   = DepositSerializer
@@ -936,6 +901,9 @@ class DepositViewSet(viewsets.ModelViewSet):
         except (TypeError, ValueError):
             raise drf_serializers.ValidationError("Minimum deposit amount is $500.")
 
+        # ★ THE FIX: explicitly grab payment_proof from request.FILES
+        # DepositSerializer has payment_proof as SerializerMethodField (read-only)
+        # so DRF never writes it automatically — we must pass it here directly.
         payment_proof = self.request.FILES.get("payment_proof")
 
         logger.info(
@@ -946,7 +914,7 @@ class DepositViewSet(viewsets.ModelViewSet):
         serializer.save(
             investor      = investor,
             status        = "pending",
-            payment_proof = payment_proof,
+            payment_proof = payment_proof,  # ★ pass file directly to model
         )
 
     def partial_update(self, request, *args, **kwargs):
@@ -982,12 +950,18 @@ class DepositViewSet(viewsets.ModelViewSet):
             instance.save(update_fields=["status"])
             logger.info(f"[DEPOSIT DECLINED] {instance.investor.name} | {instance.payment_method} | ${float(instance.amount):.2f}")
 
-        return Response(DepositSerializer(instance, context={"request": request}).data)
+        return Response(
+            DepositSerializer(instance, context={"request": request}).data
+        )
 
     def update(self, request, *args, **kwargs):
         kwargs["partial"] = True
         return self.partial_update(request, *args, **kwargs)
 
+
+# ─────────────────────────────────────────────
+# REFERRAL VIEWSET
+# ─────────────────────────────────────────────
 
 class ReferralViewSet(viewsets.ModelViewSet):
     serializer_class   = ReferralSerializer
@@ -1075,6 +1049,10 @@ class ReferralViewSet(viewsets.ModelViewSet):
             return Response({"error": "Forbidden."}, status=403)
         return super().destroy(request, *args, **kwargs)
 
+
+# ─────────────────────────────────────────────
+# COPY TRADING VIEWSET
+# ─────────────────────────────────────────────
 
 class CopyTradingSubscriptionViewSet(viewsets.ModelViewSet):
     serializer_class   = CopyTradingSubscriptionSerializer
@@ -1249,6 +1227,10 @@ class CopyTradingSubscriptionViewSet(viewsets.ModelViewSet):
         return super().destroy(request, *args, **kwargs)
 
 
+# ─────────────────────────────────────────────
+# BOT SUBSCRIPTION VIEWSET
+# ─────────────────────────────────────────────
+
 class BotSubscriptionViewSet(viewsets.ModelViewSet):
     serializer_class   = BotSubscriptionSerializer
     permission_classes = [IsAuthenticated]
@@ -1313,9 +1295,13 @@ class BotSubscriptionViewSet(viewsets.ModelViewSet):
         valid_periods  = ["weekly", "monthly", "yearly"]
 
         if plan not in valid_plans:
-            raise drf_serializers.ValidationError(f"Invalid plan. Choose from: {', '.join(valid_plans)}.")
+            raise drf_serializers.ValidationError(
+                f"Invalid plan. Choose from: {', '.join(valid_plans)}."
+            )
         if billing_period not in valid_periods:
-            raise drf_serializers.ValidationError(f"Invalid billing period. Choose from: {', '.join(valid_periods)}.")
+            raise drf_serializers.ValidationError(
+                f"Invalid billing period. Choose from: {', '.join(valid_periods)}."
+            )
 
         if investor.role != "admin":
             if BotSubscription.objects.filter(investor=investor, active=True, approved=True).exists():
@@ -1388,7 +1374,9 @@ class BotSubscriptionViewSet(viewsets.ModelViewSet):
                     investor=instance.investor,
                     status="Pending",
                     approved=False,
-                ).exclude(pk=instance.pk).update(status="Declined")
+                ).exclude(pk=instance.pk).update(
+                    status="Declined",
+                )
 
             instance.status   = new_status
             instance.approved = (new_status == "Approved")
