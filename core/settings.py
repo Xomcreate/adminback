@@ -142,16 +142,15 @@ REST_FRAMEWORK = {
 # ── Whitenoise ────────────────────────────────────────────────────────────────
 # STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
+
 # ── Email — Gmail SMTP ────────────────────────────────────────────────────────
-# ── Email — Resend SMTP ───────────────────────────────────
-# ── Email — Resend SMTP ───────────────────────────────────
 EMAIL_BACKEND       = 'django.core.mail.backends.smtp.EmailBackend'
-EMAIL_HOST          = 'smtp.resend.com'
+EMAIL_HOST          = 'smtp.gmail.com'
 EMAIL_PORT          = 587
 EMAIL_USE_TLS       = True
-EMAIL_HOST_USER     = 'resend'
-EMAIL_HOST_PASSWORD = os.environ.get('RESEND_API_KEY')
-DEFAULT_FROM_EMAIL  = 'onboarding@resend.dev'  # ← use this for now (no custom domain needed)
+EMAIL_HOST_USER     = os.environ.get('EMAIL_USER')
+EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_PASS')
+DEFAULT_FROM_EMAIL  = os.environ.get('EMAIL_USER')
 # ── Misc ──────────────────────────────────────────────────────────────────────
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://admindashboard-ruddy-beta.vercel.app")
 
