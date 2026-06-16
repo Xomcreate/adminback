@@ -78,9 +78,9 @@ class DepositSerializer(serializers.ModelSerializer):
 
     def get_payment_proof(self, obj):
         """
-        Always return a fully-qualified URL.
-        - Cloudinary-backed fields: .url already starts with https://
-        - Legacy local paths: prefix with backend origin via request context
+        Return a fully-qualified Cloudinary URL, or None.
+        Local /media/ paths are ephemeral on Render — treat as missing
+        so the frontend shows 'No proof uploaded' instead of a broken link.
         """
         if not obj.payment_proof:
             return None
@@ -88,15 +88,11 @@ class DepositSerializer(serializers.ModelSerializer):
             url = obj.payment_proof.url
         except Exception:
             return None
-
+        # Cloudinary URLs start with https:// — return as-is
         if url.startswith("http"):
             return url
-
-        request = self.context.get("request")
-        if request:
-            return request.build_absolute_uri(url)
-
-        return f"https://adminback-1.onrender.com{url}"
+        # Local /media/ path — file is gone on Render, treat as missing
+        return None
 
 
 class ChangePasswordSerializer(serializers.Serializer):
@@ -114,9 +110,10 @@ class ForgotPasswordSerializer(serializers.Serializer):
 
 def _absolute_image_url(field_file, request=None):
     """
-    Resolve an ImageField to an absolute URL regardless of storage backend.
-    Cloudinary fields already return https:// from .url.
-    Legacy local paths are prefixed with the backend origin.
+    Resolve an ImageField to an absolute Cloudinary URL, or None.
+    - Cloudinary fields already return https:// from .url  → return as-is
+    - Legacy local /media/ paths on Render are ephemeral   → return None
+      so the frontend renders 'Not uploaded' instead of a 404 link.
     """
     if not field_file:
         return None
@@ -128,10 +125,8 @@ def _absolute_image_url(field_file, request=None):
     if url.startswith("http"):
         return url
 
-    if request:
-        return request.build_absolute_uri(url)
-
-    return f"https://adminback-1.onrender.com{url}"
+    # Local path — treat as missing (file is gone from Render disk)
+    return None
 
 
 # ─────────────────────────────────────────────
@@ -144,7 +139,6 @@ class KYCSubmissionSerializer(serializers.ModelSerializer):
     doc_type_display = serializers.ReadOnlyField()
     doc              = serializers.SerializerMethodField()
     submitted        = serializers.SerializerMethodField()
-    # Override ImageFields so they always return absolute URLs
     id_front         = serializers.SerializerMethodField()
     id_back          = serializers.SerializerMethodField()
     selfie           = serializers.SerializerMethodField()
