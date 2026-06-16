@@ -856,10 +856,21 @@ class WithdrawalViewSet(viewsets.ModelViewSet):
         return super().update(request, *args, **kwargs)
 
 
+# ─────────────────────────────────────────────
+# DEPOSIT VIEWSET
+# ─────────────────────────────────────────────
+
 class DepositViewSet(viewsets.ModelViewSet):
     queryset           = Deposit.objects.all().order_by("-created_at")
     serializer_class   = DepositSerializer
     permission_classes = [IsAuthenticated]
+
+    # ★ KEY FIX: ensures request is in context for ALL list/retrieve responses
+    #   so DepositSerializer.get_payment_proof() can build absolute URLs.
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context["request"] = self.request
+        return context
 
     def get_queryset(self):
         try:
@@ -923,7 +934,10 @@ class DepositViewSet(viewsets.ModelViewSet):
             instance.save(update_fields=["status"])
             logger.info(f"[DEPOSIT DECLINED] {instance.investor.name} | {instance.payment_method} | ${float(instance.amount):.2f}")
 
-        return Response(DepositSerializer(instance).data)
+        # ★ Pass request context so payment_proof URL is absolute
+        return Response(
+            DepositSerializer(instance, context={"request": request}).data
+        )
 
     def update(self, request, *args, **kwargs):
         kwargs["partial"] = True
@@ -1199,7 +1213,7 @@ class CopyTradingSubscriptionViewSet(viewsets.ModelViewSet):
 
 
 # ─────────────────────────────────────────────
-# BOT SUBSCRIPTION VIEWSET  ← FIXED
+# BOT SUBSCRIPTION VIEWSET
 # ─────────────────────────────────────────────
 
 class BotSubscriptionViewSet(viewsets.ModelViewSet):
@@ -1275,13 +1289,11 @@ class BotSubscriptionViewSet(viewsets.ModelViewSet):
             )
 
         if investor.role != "admin":
-            # FIX 1: Block if already has an ACTIVE approved subscription
             if BotSubscription.objects.filter(investor=investor, active=True, approved=True).exists():
                 raise drf_serializers.ValidationError(
                     "You already have an active bot subscription. "
                     "Please contact support to upgrade or change your plan."
                 )
-            # FIX 2: Block if already has a PENDING subscription (was missing before)
             existing_pending = BotSubscription.objects.filter(
                 investor=investor, status="Pending", approved=False
             ).first()
@@ -1334,7 +1346,6 @@ class BotSubscriptionViewSet(viewsets.ModelViewSet):
                 )
 
             if new_status == "Approved":
-                # Deactivate any other active subscriptions for this investor
                 BotSubscription.objects.filter(
                     investor=instance.investor,
                     active=True,
@@ -1344,7 +1355,6 @@ class BotSubscriptionViewSet(viewsets.ModelViewSet):
                     approved=False,
                     status="Declined",
                 )
-                # FIX 3: Also cancel other pending subs for this investor when approving one
                 BotSubscription.objects.filter(
                     investor=instance.investor,
                     status="Pending",
