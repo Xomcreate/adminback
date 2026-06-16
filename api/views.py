@@ -144,19 +144,23 @@ def forgot_password(request):
     token      = default_token_generator.make_token(user)
     reset_link = f"{FRONTEND_URL}/reset-password/{uid}/{token}/"
 
-    send_mail(
-        subject="Password Reset Request",
-        message=(
-            f"Hi {user.username},\n\n"
-            f"Click the link below to reset your password:\n{reset_link}\n\n"
-            f"If you didn't request this, ignore this email."
-        ),
-        from_email=settings.DEFAULT_FROM_EMAIL,
-        recipient_list=[email],
-        fail_silently=True,
-    )
-    return generic_response
+    try:
+        send_mail(
+            subject="Password Reset Request",
+            message=(
+                f"Hi {user.username},\n\n"
+                f"Click the link below to reset your password:\n{reset_link}\n\n"
+                f"If you didn't request this, ignore this email."
+            ),
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[email],
+            fail_silently=False,  # ← changed so errors show in Render logs
+        )
+        logger.info(f"[FORGOT PASSWORD] Reset email sent to {email}")
+    except Exception as e:
+        logger.error(f"[FORGOT PASSWORD] Failed to send email to {email}: {e}")
 
+    return generic_response
 
 # ─────────────────────────────────────────────
 # RESET PASSWORD CONFIRM
