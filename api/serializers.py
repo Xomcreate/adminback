@@ -1,8 +1,12 @@
+import logging
+
 from rest_framework import serializers
 from .models import (
     Investor, Investment, Withdrawal, Deposit, Referral,
     CopyTradingSubscription, BotSubscription, KYCSubmission,
 )
+
+logger = logging.getLogger(__name__)
 
 MIN_AMOUNT = 500
 MAX_AMOUNT = 10_000_000
@@ -79,19 +83,39 @@ class DepositSerializer(serializers.ModelSerializer):
     def get_payment_proof(self, obj):
         """
         Return a fully-qualified Cloudinary URL, or None.
+
         Local /media/ paths are ephemeral on Render — treat as missing
         so the frontend shows 'No proof uploaded' instead of a broken link.
+
+        Logging is added so we can diagnose in production logs whether:
+          - the field is empty/null on the model,
+          - .url raised an exception (e.g. Cloudinary creds misconfigured),
+          - .url returned a non-http (local) path.
         """
         if not obj.payment_proof:
+            logger.warning(
+                f"[DEPOSIT PROOF] Deposit #{obj.pk}: payment_proof field is empty/null."
+            )
             return None
+
         try:
             url = obj.payment_proof.url
-        except Exception:
+        except Exception as exc:
+            logger.error(
+                f"[DEPOSIT PROOF] Deposit #{obj.pk}: error resolving payment_proof.url "
+                f"(name={obj.payment_proof.name!r}): {exc!r}"
+            )
             return None
+
         # Cloudinary URLs start with https:// — return as-is
         if url.startswith("http"):
             return url
+
         # Local /media/ path — file is gone on Render, treat as missing
+        logger.warning(
+            f"[DEPOSIT PROOF] Deposit #{obj.pk}: payment_proof.url is not absolute "
+            f"(name={obj.payment_proof.name!r}, url={url!r}). Treating as missing."
+        )
         return None
 
 
@@ -108,24 +132,36 @@ class ForgotPasswordSerializer(serializers.Serializer):
 # SHARED HELPER
 # ─────────────────────────────────────────────
 
-def _absolute_image_url(field_file, request=None):
+def _absolute_image_url(field_file, request=None, label=""):
     """
     Resolve an ImageField to an absolute Cloudinary URL, or None.
     - Cloudinary fields already return https:// from .url  → return as-is
     - Legacy local /media/ paths on Render are ephemeral   → return None
       so the frontend renders 'Not uploaded' instead of a 404 link.
+
+    Logging is added so KYC image issues can be diagnosed the same way
+    as deposit payment proofs.
     """
     if not field_file:
+        logger.warning(f"[IMAGE URL]{(' ' + label) if label else ''}: field is empty/null.")
         return None
+
     try:
         url = field_file.url
-    except Exception:
+    except Exception as exc:
+        logger.error(
+            f"[IMAGE URL]{(' ' + label) if label else ''}: error resolving .url "
+            f"(name={field_file.name!r}): {exc!r}"
+        )
         return None
 
     if url.startswith("http"):
         return url
 
-    # Local path — treat as missing (file is gone from Render disk)
+    logger.warning(
+        f"[IMAGE URL]{(' ' + label) if label else ''}: .url is not absolute "
+        f"(name={field_file.name!r}, url={url!r}). Treating as missing."
+    )
     return None
 
 
@@ -166,13 +202,13 @@ class KYCSubmissionSerializer(serializers.ModelSerializer):
         return obj.submitted_at.strftime("%b %d, %Y") if obj.submitted_at else "—"
 
     def get_id_front(self, obj):
-        return _absolute_image_url(obj.id_front, self.context.get("request"))
+        return _absolute_image_url(obj.id_front, self.context.get("request"), label=f"KYC #{obj.pk} id_front")
 
     def get_id_back(self, obj):
-        return _absolute_image_url(obj.id_back, self.context.get("request"))
+        return _absolute_image_url(obj.id_back, self.context.get("request"), label=f"KYC #{obj.pk} id_back")
 
     def get_selfie(self, obj):
-        return _absolute_image_url(obj.selfie, self.context.get("request"))
+        return _absolute_image_url(obj.selfie, self.context.get("request"), label=f"KYC #{obj.pk} selfie")
 
 
 # ─────────────────────────────────────────────
