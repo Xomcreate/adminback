@@ -9,39 +9,31 @@ https://docs.djangoproject.com/en/6.0/topics/settings/
 For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.0/ref/settings/
 """
-
 from pathlib import Path
 import os
 import dj_database_url
 from dotenv import load_dotenv
 load_dotenv()
 
-# Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-
-# Quick-start development settings - unsuitable for production
-# See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
-
-# SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.environ.get("SECRET_KEY")
 
-# SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = False
 
 ALLOWED_HOSTS = [
     "adminback-1.onrender.com",
     "127.0.0.1",
-    "localhost"
+    "localhost",
 ]
-
-# Application definition
 
 INSTALLED_APPS = [
     'rest_framework',
     'rest_framework_simplejwt',
     'corsheaders',
-    'django_apscheduler', 
+    'django_apscheduler',
+    'cloudinary',           # ← new
+    'cloudinary_storage',   # ← new
     'api',
     'django.contrib.admin',
     'django.contrib.auth',
@@ -50,7 +42,6 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
 ]
-
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
@@ -83,10 +74,6 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'core.wsgi.application'
 
-
-# Database
-# https://docs.djangoproject.com/en/6.0/ref/settings/#databases
-
 DATABASES = {
     "default": dj_database_url.config(
         default=os.environ.get("DATABASE_URL"),
@@ -95,53 +82,42 @@ DATABASES = {
     )
 }
 
-# Password validation
-# https://docs.djangoproject.com/en/6.0/ref/settings/#auth-password-validators
-
 AUTH_PASSWORD_VALIDATORS = [
-    {
-        'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
-    },
-    {
-        'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
-    },
-    {
-        'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator',
-    },
-    {
-        'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator',
-    },
+    {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator'},
 ]
 
-
-# Internationalization
-# https://docs.djangoproject.com/en/6.0/topics/i18n/
-
 LANGUAGE_CODE = 'en-us'
+TIME_ZONE     = 'UTC'
+USE_I18N      = True
+USE_TZ        = True
 
-TIME_ZONE = 'UTC'
-
-USE_I18N = True
-
-USE_TZ = True
-
-
-# Static files (CSS, JavaScript, Images)
-# https://docs.djangoproject.com/en/6.0/howto/static-files/
-
-STATIC_URL = "/static/"
+# ── Static files ──────────────────────────────────────────────────────────────
+STATIC_URL  = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 
-# Media files (uploads)
+# ── Media / Cloudinary ────────────────────────────────────────────────────────
+# All ImageField uploads (deposit proofs, KYC docs) go to Cloudinary.
+# The frontend receives a full https:// URL automatically — no mediaUrl() hack needed.
+
+CLOUDINARY_STORAGE = {
+    'CLOUD_NAME': os.environ.get('CLOUDINARY_CLOUD_NAME'),
+    'API_KEY':    os.environ.get('CLOUDINARY_API_KEY'),
+    'API_SECRET': os.environ.get('CLOUDINARY_API_SECRET'),
+}
+
+DEFAULT_FILE_STORAGE = 'cloudinary_storage.storage.MediaCloudinaryStorage'
+
+# MEDIA_URL is only used for local fallback during development; Cloudinary
+# returns absolute URLs so this value is ignored in production.
 MEDIA_URL  = "/media/"
 MEDIA_ROOT = os.path.join(BASE_DIR, "media")
 
-# Default primary key field type
-# https://docs.djangoproject.com/en/6.0/ref/settings/#default-auto-field
-
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-# CORS
+# ── CORS ──────────────────────────────────────────────────────────────────────
 CORS_ALLOW_ALL_ORIGINS = True
 
 CORS_ALLOWED_ORIGINS = [
@@ -149,17 +125,29 @@ CORS_ALLOWED_ORIGINS = [
     "https://adminback-1.onrender.com",
 ]
 
-# DRF + JWT
+# ── DRF + JWT ─────────────────────────────────────────────────────────────────
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ),
 }
 
-# Whitenoise static files compression
+# ── Whitenoise ────────────────────────────────────────────────────────────────
 STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+
+# ── Email — Gmail SMTP ────────────────────────────────────────────────────────
+EMAIL_BACKEND       = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_HOST          = 'smtp.gmail.com'
+EMAIL_PORT          = 587
+EMAIL_USE_TLS       = True
+EMAIL_HOST_USER     = os.environ.get('GMAIL_USER')
+EMAIL_HOST_PASSWORD = os.environ.get('GMAIL_APP_PASSWORD')
+DEFAULT_FROM_EMAIL  = os.environ.get('GMAIL_USER')
+
+# ── Misc ──────────────────────────────────────────────────────────────────────
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://admindashboard-ruddy-beta.vercel.app")
 
 ROI_SECRET_TOKEN = os.environ.get("ROI_SECRET_TOKEN", "change-me-in-production")
 
 APSCHEDULER_DATETIME_FORMAT = "N j, Y, f:s a"
-APSCHEDULER_RUN_NOW_TIMEOUT = 25  # seconds
+APSCHEDULER_RUN_NOW_TIMEOUT = 25
