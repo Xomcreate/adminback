@@ -32,8 +32,8 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt',
     'corsheaders',
     'django_apscheduler',
-    'cloudinary',           # ← new
-    'cloudinary_storage',   # ← new
+    'cloudinary',
+    'cloudinary_storage',
     'api',
     'django.contrib.admin',
     'django.contrib.auth',
@@ -99,9 +99,6 @@ STATIC_URL  = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 
 # ── Media / Cloudinary ────────────────────────────────────────────────────────
-# All ImageField uploads (deposit proofs, KYC docs) go to Cloudinary.
-# The frontend receives a full https:// URL automatically — no mediaUrl() hack needed.
-
 CLOUDINARY_STORAGE = {
     'CLOUD_NAME': os.environ.get('CLOUDINARY_CLOUD_NAME'),
     'API_KEY':    os.environ.get('CLOUDINARY_API_KEY'),
@@ -117,8 +114,6 @@ STORAGES = {
     },
 }
 
-# MEDIA_URL is only used for local fallback during development; Cloudinary
-# returns absolute URLs so this value is ignored in production.
 MEDIA_URL  = "/media/"
 MEDIA_ROOT = os.path.join(BASE_DIR, "media")
 
@@ -139,18 +134,11 @@ REST_FRAMEWORK = {
     ),
 }
 
-# ── Whitenoise ────────────────────────────────────────────────────────────────
-# STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+# ── Email — Resend API ────────────────────────────────────────────────────────
+EMAIL_BACKEND      = 'api.email_backend.ResendEmailBackend'
+RESEND_API_KEY     = os.environ.get('RESEND_API_KEY')
+DEFAULT_FROM_EMAIL = 'onboarding@resend.dev'
 
-
-# ── Email — Gmail SMTP ────────────────────────────────────────────────────────
-EMAIL_BACKEND       = 'django.core.mail.backends.smtp.EmailBackend'
-EMAIL_HOST          = 'smtp.gmail.com'
-EMAIL_PORT          = 587
-EMAIL_USE_TLS       = True
-EMAIL_HOST_USER     = os.environ.get('EMAIL_USER')
-EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_PASS')
-DEFAULT_FROM_EMAIL  = os.environ.get('EMAIL_USER')
 # ── Misc ──────────────────────────────────────────────────────────────────────
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://admindashboard-ruddy-beta.vercel.app")
 
