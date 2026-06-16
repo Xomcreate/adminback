@@ -865,8 +865,6 @@ class DepositViewSet(viewsets.ModelViewSet):
     serializer_class   = DepositSerializer
     permission_classes = [IsAuthenticated]
 
-    # ★ KEY FIX: ensures request is in context for ALL list/retrieve responses
-    #   so DepositSerializer.get_payment_proof() can build absolute URLs.
     def get_serializer_context(self):
         context = super().get_serializer_context()
         context["request"] = self.request
@@ -899,7 +897,21 @@ class DepositViewSet(viewsets.ModelViewSet):
         except (TypeError, ValueError):
             raise drf_serializers.ValidationError("Minimum deposit amount is $500.")
 
-        serializer.save(investor=investor, status="pending")
+        # ★ THE FIX: explicitly grab payment_proof from request.FILES
+        # DepositSerializer has payment_proof as SerializerMethodField (read-only)
+        # so DRF never writes it automatically — we must pass it here directly.
+        payment_proof = self.request.FILES.get("payment_proof")
+
+        logger.info(
+            f"[DEPOSIT CREATE] {investor.name} | {payment_method} | "
+            f"${amount:.2f} | proof={'yes' if payment_proof else 'none'}"
+        )
+
+        serializer.save(
+            investor      = investor,
+            status        = "pending",
+            payment_proof = payment_proof,  # ★ pass file directly to model
+        )
 
     def partial_update(self, request, *args, **kwargs):
         try:
@@ -934,7 +946,6 @@ class DepositViewSet(viewsets.ModelViewSet):
             instance.save(update_fields=["status"])
             logger.info(f"[DEPOSIT DECLINED] {instance.investor.name} | {instance.payment_method} | ${float(instance.amount):.2f}")
 
-        # ★ Pass request context so payment_proof URL is absolute
         return Response(
             DepositSerializer(instance, context={"request": request}).data
         )
