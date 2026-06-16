@@ -1,5 +1,4 @@
 import logging
-
 from rest_framework import serializers
 from .models import (
     Investor, Investment, Withdrawal, Deposit, Referral,
@@ -26,8 +25,8 @@ class InvestmentSerializer(serializers.ModelSerializer):
     investor_email = serializers.SerializerMethodField()
 
     class Meta:
-        model  = Investment
-        fields = "__all__"
+        model            = Investment
+        fields           = "__all__"
         read_only_fields = ["investor", "current_profit", "daily_roi"]
 
     def get_investor_name(self, obj):
@@ -61,16 +60,13 @@ class WithdrawalSerializer(serializers.ModelSerializer):
 
 
 # ─────────────────────────────────────────────
-# SHARED HELPER  (used by Deposit AND KYC)
+# SHARED HELPER
 # ─────────────────────────────────────────────
 
 def _absolute_image_url(field_file, request=None, label=""):
     """
-    Resolve an ImageField/FileField to an absolute Cloudinary URL, or None.
-
-    - Cloudinary fields return https:// from .url  → returned as-is.
-    - Legacy local /media/ paths on Render are ephemeral → return None
-      so the frontend shows 'Not uploaded' / 'No proof' instead of a 404.
+    Resolve a CloudinaryField to an absolute https:// URL, or None.
+    Local /media/ paths (ephemeral on Render) are treated as missing.
     """
     if not field_file:
         logger.warning(f"[IMAGE URL]{(' ' + label) if label else ''}: field is empty/null.")
@@ -88,7 +84,6 @@ def _absolute_image_url(field_file, request=None, label=""):
     if url.startswith("http"):
         return url
 
-    # Local /media/ path — ephemeral on Render, treat as missing
     logger.warning(
         f"[IMAGE URL]{(' ' + label) if label else ''}: .url is not absolute "
         f"(name={field_file.name!r}, url={url!r}). Treating as missing."
@@ -97,7 +92,7 @@ def _absolute_image_url(field_file, request=None, label=""):
 
 
 # ─────────────────────────────────────────────
-# DEPOSIT  ← now uses the same helper as KYC
+# DEPOSIT
 # ─────────────────────────────────────────────
 
 class DepositSerializer(serializers.ModelSerializer):
@@ -121,18 +116,16 @@ class DepositSerializer(serializers.ModelSerializer):
         return obj.investor.email
 
     def get_payment_proof(self, obj):
-        """
-        Delegates to the shared _absolute_image_url helper — identical
-        behaviour to KYC id_front / id_back / selfie resolution.
-        Returns a Cloudinary https:// URL, or None if not yet uploaded /
-        still on local disk (Render ephemeral storage).
-        """
         return _absolute_image_url(
             obj.payment_proof,
             self.context.get("request"),
             label=f"Deposit #{obj.pk} payment_proof",
         )
 
+
+# ─────────────────────────────────────────────
+# AUTH
+# ─────────────────────────────────────────────
 
 class ChangePasswordSerializer(serializers.Serializer):
     current_password = serializers.CharField(required=True)
@@ -180,13 +173,13 @@ class KYCSubmissionSerializer(serializers.ModelSerializer):
         return obj.submitted_at.strftime("%b %d, %Y") if obj.submitted_at else "—"
 
     def get_id_front(self, obj):
-        return _absolute_image_url(obj.id_front, self.context.get("request"), label=f"KYC #{obj.pk} id_front")
+        return _absolute_image_url(obj.id_front,  self.context.get("request"), label=f"KYC #{obj.pk} id_front")
 
     def get_id_back(self, obj):
-        return _absolute_image_url(obj.id_back, self.context.get("request"), label=f"KYC #{obj.pk} id_back")
+        return _absolute_image_url(obj.id_back,   self.context.get("request"), label=f"KYC #{obj.pk} id_back")
 
     def get_selfie(self, obj):
-        return _absolute_image_url(obj.selfie, self.context.get("request"), label=f"KYC #{obj.pk} selfie")
+        return _absolute_image_url(obj.selfie,    self.context.get("request"), label=f"KYC #{obj.pk} selfie")
 
 
 # ─────────────────────────────────────────────

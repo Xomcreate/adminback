@@ -1,11 +1,8 @@
+import random
+import string
 from django.db import models
 from django.contrib.auth.models import User
 from django.utils import timezone
-
-# ── Cloudinary ──────────────────────────────────────────────────────────────
-# All ImageFields that need cloud persistence use CloudinaryField.
-# Make sure cloudinary is installed:  pip install cloudinary django-cloudinary-storage
-# and INSTALLED_APPS includes 'cloudinary_storage' and 'cloudinary'.
 from cloudinary.models import CloudinaryField
 
 
@@ -63,7 +60,6 @@ class Investor(models.Model):
 
     @property
     def kyc_status(self):
-        """Returns the latest KYC status for this investor."""
         latest = self.kyc_submissions.order_by("-submitted_at").first()
         if not latest:
             return "unverified"
@@ -89,7 +85,6 @@ class Investment(models.Model):
     daily_roi      = models.DecimalField(max_digits=5, decimal_places=2, default=10.0)
     current_profit = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     payment_method = models.CharField(max_length=50, default="BTC")
-    # ── Cloudinary ──
     payment_proof  = CloudinaryField("investment_proof", blank=True, null=True)
     active         = models.BooleanField(default=False)
     approved       = models.BooleanField(default=False)
@@ -122,7 +117,6 @@ class Deposit(models.Model):
     investor       = models.ForeignKey(Investor, on_delete=models.CASCADE, related_name="deposits")
     payment_method = models.CharField(max_length=10)
     amount         = models.DecimalField(max_digits=12, decimal_places=2)
-    # ── Cloudinary ── (was: ImageField upload_to="deposit_proofs/")
     payment_proof  = CloudinaryField("deposit_proof", blank=True, null=True)
     status         = models.CharField(max_length=10, choices=STATUS_CHOICES, default="pending")
     created_at     = models.DateTimeField(auto_now_add=True)
@@ -168,15 +162,11 @@ class Referral(models.Model):
         )
 
 
-# ─────────────────────────────────────────────
-# KYC SUBMISSION
-# ─────────────────────────────────────────────
-
 class KYCSubmission(models.Model):
     DOC_TYPE_CHOICES = (
-        ("national_id",      "National ID"),
-        ("passport",         "Passport"),
-        ("drivers_license",  "Driver's License"),
+        ("national_id",     "National ID"),
+        ("passport",        "Passport"),
+        ("drivers_license", "Driver's License"),
     )
     STATUS_CHOICES = (
         ("pending",  "Pending"),
@@ -186,7 +176,6 @@ class KYCSubmission(models.Model):
 
     investor      = models.ForeignKey(Investor, on_delete=models.CASCADE, related_name="kyc_submissions")
     document_type = models.CharField(max_length=20, choices=DOC_TYPE_CHOICES, default="national_id")
-    # ── Cloudinary ──
     id_front      = CloudinaryField("kyc_id_front")
     id_back       = CloudinaryField("kyc_id_back")
     selfie        = CloudinaryField("kyc_selfie")
@@ -203,6 +192,30 @@ class KYCSubmission(models.Model):
     @property
     def doc_type_display(self):
         return dict(self.DOC_TYPE_CHOICES).get(self.document_type, self.document_type)
+
+
+# ─────────────────────────────────────────────
+# PASSWORD RESET OTP
+# ─────────────────────────────────────────────
+
+class PasswordResetOTP(models.Model):
+    OTP_EXPIRY_MINUTES = 10
+
+    user       = models.ForeignKey(User, on_delete=models.CASCADE, related_name="password_reset_otps")
+    code       = models.CharField(max_length=6)
+    created_at = models.DateTimeField(auto_now_add=True)
+    used       = models.BooleanField(default=False)
+
+    def is_valid(self):
+        age = timezone.now() - self.created_at
+        return not self.used and age.total_seconds() < self.OTP_EXPIRY_MINUTES * 60
+
+    @staticmethod
+    def generate_code():
+        return ''.join(random.choices(string.digits, k=6))
+
+    def __str__(self):
+        return f"{self.user.email} — {self.code} ({'used' if self.used else 'active'})"
 
 
 # ─────────────────────────────────────────────
@@ -230,14 +243,13 @@ COPY_TRADING_PLAN_DEPOSITS = {
     "Pro":           2000,
     "Institutional": 10000,
 }
-
 COPY_TRADING_TRADER_DURATIONS = {
-    "Alex Mercer":   14,
-    "Sofia Chen":    30,
-    "Raj Patel":     7,
-    "Elena Kovacs":  30,
-    "Marcus Webb":   14,
-    "Nadia Osei":    21,
+    "Alex Mercer":  14,
+    "Sofia Chen":   30,
+    "Raj Patel":    7,
+    "Elena Kovacs": 30,
+    "Marcus Webb":  14,
+    "Nadia Osei":   21,
 }
 COPY_TRADING_DEFAULT_DURATION_DAYS = 14
 
@@ -307,7 +319,6 @@ BOT_BILLING_PERIOD_CHOICES = (
     ("monthly", "Monthly"),
     ("yearly",  "Yearly"),
 )
-
 BOT_PLAN_PRICES = {
     "weekly":  {"Starter": 15,   "Pro": 40,   "Institutional": 130},
     "monthly": {"Starter": 49,   "Pro": 149,  "Institutional": 499},
