@@ -142,6 +142,7 @@ EMAIL_USE_TLS       = True
 EMAIL_HOST_USER     = 'apikey'   # literally the word "apikey", not your email
 EMAIL_HOST_PASSWORD = os.environ.get('SENDGRID_API_KEY')
 DEFAULT_FROM_EMAIL  = os.environ.get('DEFAULT_FROM_EMAIL')
+SENDGRID_API_KEY = os.environ.get('SENDGRID_API_KEY')
 # ── Misc ──────────────────────────────────────────────────────────────────────
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://admindashboard-ruddy-beta.vercel.app")
 

@@ -4,7 +4,6 @@ from datetime import timedelta
 import google.generativeai as genai
 from django.conf import settings
 from django.contrib.auth.models import User
-from django.core.mail import send_mail
 from django.db import models, transaction
 from django.db.models import Sum
 from django.utils import timezone
@@ -13,6 +12,9 @@ from rest_framework.decorators import api_view, permission_classes, action
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework import serializers as drf_serializers
+
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
 
 from .models import (
     Investor, Investment, Withdrawal, Deposit, Referral,
@@ -78,6 +80,24 @@ def get_tier(investment_count):
     elif investment_count >= 1:
         return "silver"
     return "none"
+
+
+# ─────────────────────────────────────────────
+# EMAIL — SendGrid HTTP API helper
+# (Render blocks outbound SMTP ports on free/starter tiers, so we use
+#  SendGrid's HTTPS API instead of Django's smtplib-based send_mail)
+# ─────────────────────────────────────────────
+
+def send_otp_email(to_email, subject, body_text):
+    message = Mail(
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        to_emails=to_email,
+        subject=subject,
+        plain_text_content=body_text,
+    )
+    sg = SendGridAPIClient(settings.SENDGRID_API_KEY)
+    response = sg.send(message)
+    return response.status_code
 
 
 # ─────────────────────────────────────────────
@@ -168,9 +188,10 @@ def forgot_password(request):
     PasswordResetOTP.objects.create(user=user, otp=otp_code)
 
     try:
-        send_mail(
+        send_otp_email(
+            to_email=email,
             subject="Your IPO Stock Password Reset Code",
-            message=(
+            body_text=(
                 f"Hi {user.username},\n\n"
                 f"You requested a password reset for your IPO Stock account.\n\n"
                 f"Your 6-digit reset code is:\n\n"
@@ -180,9 +201,6 @@ def forgot_password(request):
                 f"If you did not request this, you can safely ignore this email.\n\n"
                 f"— IPO Stock Team"
             ),
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[email],
-            fail_silently=False,
         )
         logger.info(f"[FORGOT PASSWORD] OTP sent to {email}")
     except Exception as e:
