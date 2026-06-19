@@ -146,3 +146,7 @@ ROI_SECRET_TOKEN = os.environ.get("ROI_SECRET_TOKEN", "change-me-in-production")
 
 APSCHEDULER_DATETIME_FORMAT = "N j, Y, f:s a"
 APSCHEDULER_RUN_NOW_TIMEOUT = 25
+
+import os
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+

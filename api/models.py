@@ -2,10 +2,6 @@ from django.db import models
 from django.contrib.auth.models import User
 from django.utils import timezone
 
-# ── Cloudinary ──────────────────────────────────────────────────────────────
-# All ImageFields that need cloud persistence use CloudinaryField.
-# Make sure cloudinary is installed:  pip install cloudinary django-cloudinary-storage
-# and INSTALLED_APPS includes 'cloudinary_storage' and 'cloudinary'.
 from cloudinary.models import CloudinaryField
 
 
@@ -63,7 +59,6 @@ class Investor(models.Model):
 
     @property
     def kyc_status(self):
-        """Returns the latest KYC status for this investor."""
         latest = self.kyc_submissions.order_by("-submitted_at").first()
         if not latest:
             return "unverified"
@@ -89,7 +84,6 @@ class Investment(models.Model):
     daily_roi      = models.DecimalField(max_digits=5, decimal_places=2, default=10.0)
     current_profit = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     payment_method = models.CharField(max_length=50, default="BTC")
-    # ── Cloudinary ──
     payment_proof  = CloudinaryField("investment_proof", blank=True, null=True)
     active         = models.BooleanField(default=False)
     approved       = models.BooleanField(default=False)
@@ -122,7 +116,6 @@ class Deposit(models.Model):
     investor       = models.ForeignKey(Investor, on_delete=models.CASCADE, related_name="deposits")
     payment_method = models.CharField(max_length=10)
     amount         = models.DecimalField(max_digits=12, decimal_places=2)
-    # ── Cloudinary ── (was: ImageField upload_to="deposit_proofs/")
     payment_proof  = CloudinaryField("deposit_proof", blank=True, null=True)
     status         = models.CharField(max_length=10, choices=STATUS_CHOICES, default="pending")
     created_at     = models.DateTimeField(auto_now_add=True)
@@ -168,10 +161,6 @@ class Referral(models.Model):
         )
 
 
-# ─────────────────────────────────────────────
-# KYC SUBMISSION
-# ─────────────────────────────────────────────
-
 class KYCSubmission(models.Model):
     DOC_TYPE_CHOICES = (
         ("national_id",      "National ID"),
@@ -186,7 +175,6 @@ class KYCSubmission(models.Model):
 
     investor      = models.ForeignKey(Investor, on_delete=models.CASCADE, related_name="kyc_submissions")
     document_type = models.CharField(max_length=20, choices=DOC_TYPE_CHOICES, default="national_id")
-    # ── Cloudinary ──
     id_front      = CloudinaryField("kyc_id_front")
     id_back       = CloudinaryField("kyc_id_back")
     selfie        = CloudinaryField("kyc_selfie")
@@ -204,10 +192,6 @@ class KYCSubmission(models.Model):
     def doc_type_display(self):
         return dict(self.DOC_TYPE_CHOICES).get(self.document_type, self.document_type)
 
-
-# ─────────────────────────────────────────────
-# COPY TRADING
-# ─────────────────────────────────────────────
 
 COPY_TRADING_PLAN_CHOICES = (
     ("Starter",       "Starter"),
@@ -230,7 +214,6 @@ COPY_TRADING_PLAN_DEPOSITS = {
     "Pro":           2000,
     "Institutional": 10000,
 }
-
 COPY_TRADING_TRADER_DURATIONS = {
     "Alex Mercer":   14,
     "Sofia Chen":    30,
@@ -288,10 +271,6 @@ class CopyTradingSubscription(models.Model):
         )
 
 
-# ─────────────────────────────────────────────
-# BOT SUBSCRIPTIONS
-# ─────────────────────────────────────────────
-
 BOT_SUBSCRIPTION_PLAN_CHOICES = (
     ("Starter",       "Starter"),
     ("Pro",           "Pro"),
@@ -307,7 +286,6 @@ BOT_BILLING_PERIOD_CHOICES = (
     ("monthly", "Monthly"),
     ("yearly",  "Yearly"),
 )
-
 BOT_PLAN_PRICES = {
     "weekly":  {"Starter": 15,   "Pro": 40,   "Institutional": 130},
     "monthly": {"Starter": 49,   "Pro": 149,  "Institutional": 499},
@@ -339,3 +317,43 @@ class BotSubscription(models.Model):
 
     def __str__(self):
         return f"{self.investor.name} — {self.plan} / {self.billing_period} [{self.status}]"
+
+
+# ─────────────────────────────────────────────
+# CHAT  (Gemini-powered live chat)
+# ─────────────────────────────────────────────
+
+class ChatSession(models.Model):
+    """One persistent chat session per authenticated user, or keyed by session_key for anonymous."""
+    user        = models.OneToOneField(
+        User, on_delete=models.CASCADE,
+        null=True, blank=True, related_name="chat_session"
+    )
+    session_key = models.CharField(max_length=64, blank=True, default="")
+    created_at  = models.DateTimeField(auto_now_add=True)
+    updated_at  = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+
+    def __str__(self):
+        identifier = self.user.username if self.user else self.session_key or "anon"
+        return f"ChatSession #{self.pk} — {identifier}"
+
+
+class ChatMessage(models.Model):
+    ROLE_CHOICES = (
+        ("user",      "User"),
+        ("assistant", "Assistant"),
+    )
+
+    session    = models.ForeignKey(ChatSession, on_delete=models.CASCADE, related_name="messages")
+    role       = models.CharField(max_length=10, choices=ROLE_CHOICES)
+    content    = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+
+    def __str__(self):
+        return f"[{self.role}] {self.content[:60]}"

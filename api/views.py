@@ -1,6 +1,7 @@
 import logging
 from datetime import timedelta
 
+import google.generativeai as genai
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.contrib.auth.tokens import default_token_generator
@@ -22,6 +23,7 @@ from .models import (
     COPY_TRADING_TRADER_DURATIONS, COPY_TRADING_DEFAULT_DURATION_DAYS,
     BotSubscription, BOT_PLAN_PRICES, BOT_PLAN_DEPOSITS,
     KYCSubmission,
+    ChatSession, ChatMessage,
 )
 from .serializers import (
     InvestorSerializer, InvestmentSerializer, WithdrawalSerializer,
@@ -33,6 +35,27 @@ from .serializers import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ── Gemini setup ──────────────────────────────────────────────────────────────
+genai.configure(api_key=settings.GEMINI_API_KEY)
+
+# NOTE: gemini-1.5-flash has been retired. Using gemini-3.5-flash (current stable model).
+GEMINI_MODEL_NAME = "gemini-2.5-flash-lite"
+
+CHAT_SYSTEM_PROMPT = """You are a helpful, friendly support agent for IPO Stock — a professional investment platform.
+
+You help users with:
+- Investment plans, stock categories, and how the platform works
+- Deposits, withdrawals, and wallet balance questions
+- KYC verification process and document requirements
+- Copy trading and bot subscription plans
+- Referral program details
+- General account and security questions
+
+Be concise, professional, and warm. If a question is outside your scope (e.g. live balances or specific transaction statuses), politely ask the user to check their dashboard or contact the support team directly.
+
+Do NOT make up specific account numbers, balances, or transaction details.
+Keep responses under 120 words unless a detailed explanation is genuinely needed."""
 
 STOCK_CATEGORIES = [
     "Shopify Inc. (SHOP)", "Tesla (TSLA)", "Meta (META)", "Amazon (AMZN)",
@@ -154,13 +177,14 @@ def forgot_password(request):
             ),
             from_email=settings.DEFAULT_FROM_EMAIL,
             recipient_list=[email],
-            fail_silently=False,  # ← changed so errors show in Render logs
+            fail_silently=False,
         )
         logger.info(f"[FORGOT PASSWORD] Reset email sent to {email}")
     except Exception as e:
         logger.error(f"[FORGOT PASSWORD] Failed to send email to {email}: {e}")
 
     return generic_response
+
 
 # ─────────────────────────────────────────────
 # RESET PASSWORD CONFIRM
@@ -193,7 +217,7 @@ def reset_password_confirm(request):
 
 
 # ─────────────────────────────────────────────
-# FALLBACK WEBHOOK / ROI TRIGGER
+# ROI TRIGGER
 # ─────────────────────────────────────────────
 
 @api_view(["POST"])
@@ -260,7 +284,7 @@ def kyc_submit(request):
                 status=400,
             )
 
-    doc_type = request.data.get("document_type", "national_id")
+    doc_type        = request.data.get("document_type", "national_id")
     valid_doc_types = ["national_id", "passport", "drivers_license"]
     if doc_type not in valid_doc_types:
         return Response(
@@ -309,10 +333,8 @@ def kyc_all(request):
         requester = Investor.objects.get(user=request.user)
     except Investor.DoesNotExist:
         return Response({"detail": "Not found."}, status=404)
-
     if requester.role != "admin":
         return Response({"detail": "Forbidden."}, status=403)
-
     submissions = KYCSubmission.objects.select_related("investor").order_by("-submitted_at")
     return Response(
         KYCSubmissionSerializer(submissions, many=True, context={"request": request}).data
@@ -326,29 +348,19 @@ def kyc_approve(request, pk):
         requester = Investor.objects.get(user=request.user)
     except Investor.DoesNotExist:
         return Response({"detail": "Not found."}, status=404)
-
     if requester.role != "admin":
         return Response({"detail": "Forbidden."}, status=403)
-
     try:
         submission = KYCSubmission.objects.select_related("investor").get(pk=pk)
     except KYCSubmission.DoesNotExist:
         return Response({"detail": "KYC submission not found."}, status=404)
-
     if submission.status == "approved":
         return Response({"detail": "Already approved."}, status=400)
-
     submission.status      = "approved"
     submission.reviewed_at = timezone.now()
     submission.save(update_fields=["status", "reviewed_at"])
-
-    logger.info(
-        f"[KYC APPROVED] #{submission.pk} — {submission.investor.name} "
-        f"approved by admin {requester.name}"
-    )
-    return Response(
-        KYCSubmissionSerializer(submission, context={"request": request}).data
-    )
+    logger.info(f"[KYC APPROVED] #{submission.pk} — {submission.investor.name} approved by admin {requester.name}")
+    return Response(KYCSubmissionSerializer(submission, context={"request": request}).data)
 
 
 @api_view(["POST"])
@@ -358,29 +370,19 @@ def kyc_reject(request, pk):
         requester = Investor.objects.get(user=request.user)
     except Investor.DoesNotExist:
         return Response({"detail": "Not found."}, status=404)
-
     if requester.role != "admin":
         return Response({"detail": "Forbidden."}, status=403)
-
     try:
         submission = KYCSubmission.objects.select_related("investor").get(pk=pk)
     except KYCSubmission.DoesNotExist:
         return Response({"detail": "KYC submission not found."}, status=404)
-
     if submission.status == "rejected":
         return Response({"detail": "Already rejected."}, status=400)
-
     submission.status      = "rejected"
     submission.reviewed_at = timezone.now()
     submission.save(update_fields=["status", "reviewed_at"])
-
-    logger.info(
-        f"[KYC REJECTED] #{submission.pk} — {submission.investor.name} "
-        f"rejected by admin {requester.name}"
-    )
-    return Response(
-        KYCSubmissionSerializer(submission, context={"request": request}).data
-    )
+    logger.info(f"[KYC REJECTED] #{submission.pk} — {submission.investor.name} rejected by admin {requester.name}")
+    return Response(KYCSubmissionSerializer(submission, context={"request": request}).data)
 
 
 # ─────────────────────────────────────────────
@@ -400,7 +402,6 @@ def approve_investment(request, pk):
         investment = Investment.objects.get(pk=pk)
     except Investment.DoesNotExist:
         return Response({"error": "Investment not found"}, status=404)
-
     investment.approved = True
     investment.active   = True
     investment.status   = "Approved"
@@ -442,7 +443,6 @@ def add_profit(request, pk):
         investment.current_profit += amount_decimal
         investment.active = False
         investment.save(update_fields=["current_profit", "active"])
-
         investor = Investor.objects.select_for_update().get(pk=investment.investor.pk)
         investor.balance += payout
         investor.save(update_fields=["balance"])
@@ -774,13 +774,19 @@ class InvestmentViewSet(viewsets.ModelViewSet):
                 investor = Investor.objects.select_for_update().get(pk=instance.investor.pk)
                 investor.balance += instance.amount
                 investor.save(update_fields=["balance"])
-                logger.info(f"[REFUND] {investor.name} | ${float(instance.amount):.2f} refunded — investment #{instance.pk} declined")
+                logger.info(
+                    f"[REFUND] {investor.name} | ${float(instance.amount):.2f} refunded "
+                    f"— investment #{instance.pk} declined"
+                )
 
         kwargs["partial"] = True
         serializer = self.get_serializer(instance, data=mutable, partial=True)
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
-        logger.info(f"[INVESTMENT UPDATE] #{instance.pk} → status={mutable.get('status')} | approved={mutable.get('approved')} | active={mutable.get('active')}")
+        logger.info(
+            f"[INVESTMENT UPDATE] #{instance.pk} → status={mutable.get('status')} "
+            f"| approved={mutable.get('approved')} | active={mutable.get('active')}"
+        )
         return Response(serializer.data)
 
     def update(self, request, *args, **kwargs):
@@ -835,7 +841,10 @@ class WithdrawalViewSet(viewsets.ModelViewSet):
                 investor = Investor.objects.select_for_update().get(pk=instance.investor.pk)
                 if investor.balance < instance.amount:
                     return Response(
-                        {"error": f"Insufficient balance. Investor has ${float(investor.balance):.2f} but withdrawal is ${float(instance.amount):.2f}."},
+                        {"error": (
+                            f"Insufficient balance. Investor has ${float(investor.balance):.2f} "
+                            f"but withdrawal is ${float(instance.amount):.2f}."
+                        )},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
                 investor.balance -= instance.amount
@@ -892,7 +901,9 @@ class DepositViewSet(viewsets.ModelViewSet):
         payment_method = self.request.data.get("payment_method", "")
         valid_methods  = ["BTC", "TRX", "ETH", "USDT", "LTC", "XRP"]
         if payment_method not in valid_methods:
-            raise drf_serializers.ValidationError(f"Invalid payment method. Choose from: {', '.join(valid_methods)}.")
+            raise drf_serializers.ValidationError(
+                f"Invalid payment method. Choose from: {', '.join(valid_methods)}."
+            )
 
         try:
             amount = float(self.request.data.get("amount", 0))
@@ -901,9 +912,6 @@ class DepositViewSet(viewsets.ModelViewSet):
         except (TypeError, ValueError):
             raise drf_serializers.ValidationError("Minimum deposit amount is $500.")
 
-        # ★ THE FIX: explicitly grab payment_proof from request.FILES
-        # DepositSerializer has payment_proof as SerializerMethodField (read-only)
-        # so DRF never writes it automatically — we must pass it here directly.
         payment_proof = self.request.FILES.get("payment_proof")
 
         logger.info(
@@ -914,7 +922,7 @@ class DepositViewSet(viewsets.ModelViewSet):
         serializer.save(
             investor      = investor,
             status        = "pending",
-            payment_proof = payment_proof,  # ★ pass file directly to model
+            payment_proof = payment_proof,
         )
 
     def partial_update(self, request, *args, **kwargs):
@@ -948,11 +956,12 @@ class DepositViewSet(viewsets.ModelViewSet):
         else:
             instance.status = "declined"
             instance.save(update_fields=["status"])
-            logger.info(f"[DEPOSIT DECLINED] {instance.investor.name} | {instance.payment_method} | ${float(instance.amount):.2f}")
+            logger.info(
+                f"[DEPOSIT DECLINED] {instance.investor.name} | "
+                f"{instance.payment_method} | ${float(instance.amount):.2f}"
+            )
 
-        return Response(
-            DepositSerializer(instance, context={"request": request}).data
-        )
+        return Response(DepositSerializer(instance, context={"request": request}).data)
 
     def update(self, request, *args, **kwargs):
         kwargs["partial"] = True
@@ -1023,12 +1032,19 @@ class ReferralViewSet(viewsets.ModelViewSet):
                 referrer = Investor.objects.select_for_update().get(pk=instance.referrer.pk)
                 referrer.balance += instance.commission
                 referrer.save(update_fields=["balance"])
-                logger.info(f"[REFERRAL APPROVED] {referrer.name} | Commission: ${float(instance.commission):.2f} | New balance: ${float(referrer.balance):.2f}")
+                logger.info(
+                    f"[REFERRAL APPROVED] {referrer.name} | "
+                    f"Commission: ${float(instance.commission):.2f} | "
+                    f"New balance: ${float(referrer.balance):.2f}"
+                )
             elif new_status == "inactive" and instance.status == "active":
                 referrer = Investor.objects.select_for_update().get(pk=instance.referrer.pk)
                 referrer.balance = max(referrer.balance - instance.commission, 0)
                 referrer.save(update_fields=["balance"])
-                logger.info(f"[REFERRAL DECLINED] Commission reversed for {referrer.name} | -${float(instance.commission):.2f}")
+                logger.info(
+                    f"[REFERRAL DECLINED] Commission reversed for {referrer.name} "
+                    f"| -${float(instance.commission):.2f}"
+                )
 
             instance.status   = new_status
             instance.approved = (new_status == "active")
@@ -1063,9 +1079,7 @@ class CopyTradingSubscriptionViewSet(viewsets.ModelViewSet):
             investor = Investor.objects.get(user=self.request.user)
         except Investor.DoesNotExist:
             return CopyTradingSubscription.objects.none()
-
         expire_copy_trading_subscriptions()
-
         if investor.role == "admin":
             return CopyTradingSubscription.objects.all().order_by("-created_at")
         return CopyTradingSubscription.objects.filter(investor=investor).order_by("-created_at")
@@ -1078,7 +1092,9 @@ class CopyTradingSubscriptionViewSet(viewsets.ModelViewSet):
 
         plan = self.request.data.get("plan", "").strip()
         if plan not in list(COPY_TRADING_PLAN_PRICES.keys()):
-            raise drf_serializers.ValidationError(f"Invalid plan. Choose from: {', '.join(COPY_TRADING_PLAN_PRICES.keys())}.")
+            raise drf_serializers.ValidationError(
+                f"Invalid plan. Choose from: {', '.join(COPY_TRADING_PLAN_PRICES.keys())}."
+            )
 
         if investor.role != "admin":
             if CopyTradingSubscription.objects.filter(investor=investor, active=True).exists():
@@ -1108,7 +1124,8 @@ class CopyTradingSubscriptionViewSet(viewsets.ModelViewSet):
         )
         logger.info(
             f"[COPY TRADING] {investor.name} subscribed to {plan} plan "
-            f"(fee={plan_fee}, deposit={deposit_amount}, duration={duration_days}d, trader={copied_trader})"
+            f"(fee={plan_fee}, deposit={deposit_amount}, "
+            f"duration={duration_days}d, trader={copied_trader})"
         )
 
     def partial_update(self, request, *args, **kwargs):
@@ -1314,22 +1331,22 @@ class BotSubscriptionViewSet(viewsets.ModelViewSet):
             ).first()
             if existing_pending:
                 raise drf_serializers.ValidationError(
-                    f"You already have a pending {existing_pending.plan} plan request awaiting admin approval. "
-                    "Please wait for it to be reviewed before submitting a new one."
+                    f"You already have a pending {existing_pending.plan} plan request "
+                    "awaiting admin approval. Please wait for it to be reviewed."
                 )
 
         plan_fee       = BOT_PLAN_PRICES.get(billing_period, {}).get(plan, 0)
         deposit_amount = BOT_PLAN_DEPOSITS.get(plan, 0)
 
         serializer.save(
-            investor=investor,
-            plan=plan,
-            billing_period=billing_period,
-            plan_fee=plan_fee,
-            deposit_amount=deposit_amount,
-            status="Pending",
-            approved=False,
-            active=False,
+            investor       = investor,
+            plan           = plan,
+            billing_period = billing_period,
+            plan_fee       = plan_fee,
+            deposit_amount = deposit_amount,
+            status         = "Pending",
+            approved       = False,
+            active         = False,
         )
         logger.info(
             f"[BOT SUBSCRIPTION] {investor.name} requested {plan} / {billing_period} "
@@ -1362,21 +1379,11 @@ class BotSubscriptionViewSet(viewsets.ModelViewSet):
 
             if new_status == "Approved":
                 BotSubscription.objects.filter(
-                    investor=instance.investor,
-                    active=True,
-                    approved=True,
-                ).exclude(pk=instance.pk).update(
-                    active=False,
-                    approved=False,
-                    status="Declined",
-                )
+                    investor=instance.investor, active=True, approved=True,
+                ).exclude(pk=instance.pk).update(active=False, approved=False, status="Declined")
                 BotSubscription.objects.filter(
-                    investor=instance.investor,
-                    status="Pending",
-                    approved=False,
-                ).exclude(pk=instance.pk).update(
-                    status="Declined",
-                )
+                    investor=instance.investor, status="Pending", approved=False,
+                ).exclude(pk=instance.pk).update(status="Declined")
 
             instance.status   = new_status
             instance.approved = (new_status == "Approved")
@@ -1419,3 +1426,103 @@ class BotSubscriptionViewSet(viewsets.ModelViewSet):
             f"{instance.investor.name} / {instance.plan}"
         )
         return super().destroy(request, *args, **kwargs)
+
+
+# ─────────────────────────────────────────────
+# CHAT  (Gemini-powered)
+# ─────────────────────────────────────────────
+
+def _get_or_create_chat_session(request):
+    if request.user and request.user.is_authenticated:
+        session, _ = ChatSession.objects.get_or_create(user=request.user)
+        return session
+
+    session_key = (
+        request.data.get("session_key")
+        or request.query_params.get("session_key", "")
+    ).strip()
+
+    if session_key:
+        session, _ = ChatSession.objects.get_or_create(session_key=session_key)
+        return session
+
+    return ChatSession.objects.create()
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def chat_message_view(request):
+    user_text = (request.data.get("message") or "").strip()
+    if not user_text:
+        return Response({"error": "message is required."}, status=400)
+    if len(user_text) > 1000:
+        return Response({"error": "Message too long. Keep it under 1000 characters."}, status=400)
+
+    session = _get_or_create_chat_session(request)
+
+    ChatMessage.objects.create(session=session, role="user", content=user_text)
+
+    all_messages   = list(session.messages.order_by("created_at"))
+    prior_messages = all_messages[:-1][-18:]
+    gemini_history = [
+        {
+            "role":  "user" if msg.role == "user" else "model",
+            "parts": [msg.content],
+        }
+        for msg in prior_messages
+    ]
+
+    try:
+        model = genai.GenerativeModel(
+            model_name=GEMINI_MODEL_NAME,
+            system_instruction=CHAT_SYSTEM_PROMPT,
+        )
+        chat       = model.start_chat(history=gemini_history)
+        reply_text = chat.send_message(user_text).text.strip()
+    except Exception as exc:
+        logger.error(f"[CHAT] Gemini error: {exc!r}")
+        reply_text = (
+            "I'm having a little trouble right now. "
+            "Please try again in a moment or reach out to our support team directly."
+        )
+
+    ChatMessage.objects.create(session=session, role="assistant", content=reply_text)
+
+    logger.info(
+        f"[CHAT] session={session.pk} | "
+        f"user={'auth:' + str(request.user.id) if request.user.is_authenticated else 'anon'} | "
+        f"msg_len={len(user_text)}"
+    )
+
+    return Response({
+        "reply":       reply_text,
+        "session_key": session.session_key or str(session.pk),
+    })
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def chat_history_view(request):
+    session  = _get_or_create_chat_session(request)
+    messages = session.messages.order_by("created_at")[:30]
+    data = [
+        {
+            "role":       m.role,
+            "content":    m.content,
+            "created_at": m.created_at.isoformat(),
+        }
+        for m in messages
+    ]
+    return Response({
+        "messages":    data,
+        "session_key": session.session_key or str(session.pk),
+    })
+
+
+@api_view(["DELETE"])
+@permission_classes([AllowAny])
+def chat_clear_view(request):
+    session = _get_or_create_chat_session(request)
+    deleted_count, _ = session.messages.all().delete()
+    logger.info(f"[CHAT CLEARED] session={session.pk} | {deleted_count} messages deleted")
+    return Response({"message": "Chat history cleared."})

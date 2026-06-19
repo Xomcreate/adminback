@@ -22,11 +22,14 @@ from .views import (
     change_password,
     forgot_password,
     reset_password_confirm,
-    # ── KYC ──
     kyc_submit,
     kyc_all,
     kyc_approve,
     kyc_reject,
+    # ── Chat ──
+    chat_message_view,
+    chat_history_view,
+    chat_clear_view,
 )
 
 router = DefaultRouter()
@@ -42,7 +45,7 @@ referral_my_stats = ReferralViewSet.as_view({"get": "my_stats"})
 bot_my_active     = BotSubscriptionViewSet.as_view({"get": "my_active"})
 
 urlpatterns = [
-    # ── Custom ViewSet actions (before router to avoid pk conflicts) ───────
+    # ── Custom ViewSet actions ────────────────────────────────────────────
     path("referrals/my-stats/",          referral_my_stats, name="referral-my-stats"),
     path("bot-subscriptions/my-active/", bot_my_active,     name="bot-subscription-my-active"),
 
@@ -70,10 +73,15 @@ urlpatterns = [
     path("investments/<int:pk>/add_profit/", add_profit),
 
     # ── KYC ───────────────────────────────────────────────────────────────
-    path("kyc/submit/",             kyc_submit),
-    path("kyc/all/",                kyc_all),
-    path("kyc/<int:pk>/approve/",   kyc_approve),
-    path("kyc/<int:pk>/reject/",    kyc_reject),
+    path("kyc/submit/",           kyc_submit),
+    path("kyc/all/",              kyc_all),
+    path("kyc/<int:pk>/approve/", kyc_approve),
+    path("kyc/<int:pk>/reject/",  kyc_reject),
+
+    # ── Chat ──────────────────────────────────────────────────────────────
+    path("chat/message/", chat_message_view, name="chat-message"),
+    path("chat/history/", chat_history_view, name="chat-history"),
+    path("chat/clear/",   chat_clear_view,   name="chat-clear"),
 
     # ── Misc ──────────────────────────────────────────────────────────────
     path("trigger-roi/", trigger_roi),
