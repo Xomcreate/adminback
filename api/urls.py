@@ -21,6 +21,7 @@ from .views import (
     trigger_roi,
     change_password,
     forgot_password,
+    verify_otp,
     reset_password_confirm,
     kyc_submit,
     kyc_all,
@@ -56,6 +57,7 @@ urlpatterns = [
     path("register/",               register),
     path("change-password/",        change_password),
     path("forgot-password/",        forgot_password),
+    path("verify-otp/",             verify_otp),
     path("reset-password/confirm/", reset_password_confirm),
 
     # ── Dashboard / profile ───────────────────────────────────────────────

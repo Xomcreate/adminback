@@ -1,3 +1,5 @@
+import random
+
 from django.db import models
 from django.contrib.auth.models import User
 from django.utils import timezone
@@ -193,6 +195,35 @@ class KYCSubmission(models.Model):
         return dict(self.DOC_TYPE_CHOICES).get(self.document_type, self.document_type)
 
 
+# ─────────────────────────────────────────────
+# PASSWORD RESET OTP
+# ─────────────────────────────────────────────
+
+class PasswordResetOTP(models.Model):
+    user       = models.ForeignKey(User, on_delete=models.CASCADE, related_name="password_reset_otps")
+    otp        = models.CharField(max_length=6)
+    created_at = models.DateTimeField(auto_now_add=True)
+    is_used    = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.user.username} — OTP [{self.otp}] used={self.is_used}"
+
+    def is_expired(self):
+        # OTP expires after 10 minutes
+        return timezone.now() > self.created_at + timezone.timedelta(minutes=10)
+
+    @staticmethod
+    def generate_otp():
+        return str(random.randint(100000, 999999))
+
+
+# ─────────────────────────────────────────────
+# COPY TRADING
+# ─────────────────────────────────────────────
+
 COPY_TRADING_PLAN_CHOICES = (
     ("Starter",       "Starter"),
     ("Pro",           "Pro"),
@@ -271,6 +302,10 @@ class CopyTradingSubscription(models.Model):
         )
 
 
+# ─────────────────────────────────────────────
+# BOT SUBSCRIPTION
+# ─────────────────────────────────────────────
+
 BOT_SUBSCRIPTION_PLAN_CHOICES = (
     ("Starter",       "Starter"),
     ("Pro",           "Pro"),
@@ -324,7 +359,6 @@ class BotSubscription(models.Model):
 # ─────────────────────────────────────────────
 
 class ChatSession(models.Model):
-    """One persistent chat session per authenticated user, or keyed by session_key for anonymous."""
     user        = models.OneToOneField(
         User, on_delete=models.CASCADE,
         null=True, blank=True, related_name="chat_session"
