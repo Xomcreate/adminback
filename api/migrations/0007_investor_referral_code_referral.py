@@ -3,22 +3,6 @@ from django.db import migrations, models
 import django.db.models.deletion
 
 
-def add_referral_code_if_missing(apps, schema_editor):
-    """Add the column only if it doesn't already exist."""
-    from django.db import connection
-    with connection.cursor() as cursor:
-        cursor.execute("""
-            SELECT column_name 
-            FROM information_schema.columns 
-            WHERE table_name='api_investor' AND column_name='referral_code'
-        """)
-        exists = cursor.fetchone()
-        if not exists:
-            cursor.execute(
-                "ALTER TABLE api_investor ADD COLUMN referral_code VARCHAR(20) NOT NULL DEFAULT ''"
-            )
-
-
 def generate_referral_codes(apps, schema_editor):
     """Backfill empty referral codes."""
     Investor = apps.get_model("api", "Investor")
@@ -30,22 +14,6 @@ def generate_referral_codes(apps, schema_editor):
         investor.save(update_fields=["referral_code"])
 
 
-def add_unique_constraint(apps, schema_editor):
-    """Add unique constraint only if it doesn't already exist."""
-    from django.db import connection
-    with connection.cursor() as cursor:
-        cursor.execute("""
-            SELECT constraint_name
-            FROM information_schema.table_constraints
-            WHERE table_name='api_investor' AND constraint_name='api_investor_referral_code_key'
-        """)
-        exists = cursor.fetchone()
-        if not exists:
-            cursor.execute(
-                "ALTER TABLE api_investor ADD CONSTRAINT api_investor_referral_code_key UNIQUE (referral_code)"
-            )
-
-
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -53,10 +21,11 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        # Step 1: add column only if missing
-        migrations.RunPython(
-            add_referral_code_if_missing,
-            reverse_code=migrations.RunPython.noop,
+        # Step 1: add the column properly (updates both DB and Django's state)
+        migrations.AddField(
+            model_name="investor",
+            name="referral_code",
+            field=models.CharField(max_length=20, default="", blank=True),
         ),
 
         # Step 2: backfill empty codes
@@ -65,20 +34,14 @@ class Migration(migrations.Migration):
             reverse_code=migrations.RunPython.noop,
         ),
 
-        # Step 3: add unique constraint only if missing
-        migrations.RunPython(
-            add_unique_constraint,
-            reverse_code=migrations.RunPython.noop,
-        ),
-
-        # Step 4: tell Django's state about the final field definition
+        # Step 3: now enforce uniqueness, after all rows have real codes
         migrations.AlterField(
             model_name="investor",
             name="referral_code",
             field=models.CharField(max_length=20, unique=True, blank=True),
         ),
 
-        # Step 5: create Referral table
+        # Step 4: create Referral table
         migrations.CreateModel(
             name="Referral",
             fields=[
